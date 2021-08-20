@@ -4,8 +4,7 @@ import _debounce from 'lodash.debounce'
 import { RemoteHypercore } from 'hyperspace'
 import { client } from './hyperspace.js'
 import Hyperbee from 'hyperbee'
-import * as schemas from '../schemas/index.js'
-import { Schema } from '../schemas/schema.js'
+import { TableSchema } from '../schemas/schema.js'
 import { createValidator } from '../schemas/util.js'
 import pumpify from 'pumpify'
 import pump from 'pump'
@@ -14,6 +13,7 @@ import through2 from 'through2'
 import bytes from 'bytes'
 import lock from '../lib/lock.js'
 import { constructEntryUrl } from '../lib/strings.js'
+import { TableSettings } from '../gen/atek.cloud/adb-api.js'
 
 const READ_TIMEOUT = 10e3
 const BACKGROUND_INDEXING_DELAY = 5e3 // how much time is allowed to pass before globally indexing an update
@@ -53,15 +53,15 @@ export interface BlobPointer {
   mimeType?: string
 }
 
-export interface DbRecord {
-  seq: number
+export interface DbRecord<T> {
+  seq?: number
   key: string
-  value: object | null
+  value: T | undefined | null
 }
 
-export interface DbDiff {
-  left: DbRecord | null
-  right: DbRecord | null
+export interface DbDiff<T> {
+  left: DbRecord<T> | null
+  right: DbRecord<T> | null
 }
 
 export interface DbDesc {
@@ -69,10 +69,6 @@ export interface DbDesc {
   displayName?: string
   blobsFeedKey?: string
   tables?: ({domain?: string, name?: string, rev?: number})[]
-}
-
-export interface BlobPointerRecord extends DbRecord {
-  value: BlobPointer
 }
 
 export interface TableListOpts {
@@ -86,10 +82,10 @@ export interface TableListOpts {
   limit?: number
 }
 
-export interface ReadCursor {
+export interface ReadCursor<T> {
   opts?: TableListOpts,
   db: BaseHyperbeeDB,
-  next: (limit?: number) => Promise<DbRecord[]|null>
+  next: (limit?: number) => Promise<DbRecord<T>[]|null>
 }
 
 const uwgDescription = createValidator({
@@ -307,15 +303,20 @@ export class BaseHyperbeeDB extends EventEmitter {
     this.bee.feed.on('append', () => cb())
   }
 
-  getTable (schemaId: string): Table {
-    if (this.tables[schemaId]) return this.tables[schemaId]
-    const schema = schemas.getCached(schemaId)
-    if (!schema) throw new Error(`Unsupported table schema: ${schemaId}`)
-    this.tables[schemaId] = new Table(this, schema)
-    return this.tables[schemaId]
+  table (tableId: string, definition?: TableSettings): Table {
+    if (this.tables[tableId]) {
+      if (!definition?.revision || definition.revision <= (this.tables[tableId].schema.revision || 0)) {
+        return this.tables[tableId]
+      }
+    }
+    if (!definition) {
+      throw new Error(`Table not found and no definition was provided: ${tableId}`)
+    }
+    this.tables[tableId] = new Table(this, new TableSchema(tableId, definition))
+    return this.tables[tableId]
   }
 
-  async ensureTableIsInMetadata (schema: Schema) {
+  async ensureTableIsInMetadata (schema: TableSchema) {
     // TODO
     // if (this.desc.tables?.find?.(t => t.domain === schema.domain && t.name === schema.name && t.rev >= schema.rev)) {
     //   return
@@ -459,19 +460,19 @@ class Blobs {
 export class Table {
   db: BaseHyperbeeDB
   _bee: Hyperbee | undefined
-  schema: Schema
+  schema: TableSchema
   _schemaDomain: string
   _schemaName: string
   lock: (id: string) => (Promise<() => void>)
 
-  constructor (db: BaseHyperbeeDB, schema: Schema) {
-    const [domain, name] = schema.id.split('/')
+  constructor (db: BaseHyperbeeDB, schema: TableSchema) {
+    const [domain, name] = schema.tableId.split('/')
     this.db = db
     this._bee = undefined
     this.schema = schema
     this._schemaDomain = domain
     this._schemaName = name
-    this.lock = (id = '') => this.db.lock(`${this.schema.id}:${id}`)
+    this.lock = (id = '') => this.db.lock(`${this.schema.tableId}:${id}`)
   }
 
   teardown () {
@@ -495,10 +496,10 @@ export class Table {
   }
 
   constructEntryUrl (key: string): string {
-    return constructEntryUrl(this.db.url, this.schema.id, key)
+    return constructEntryUrl(this.db.url, this.schema.tableId, key)
   }
 
-  async get (key: string): Promise<DbRecord> {
+  async get<T> (key: string): Promise<DbRecord<T>> {
     await this.db.touch()
     const entry = await this.bee.get(String(key), {timeout: READ_TIMEOUT})
     if (entry) {
@@ -507,7 +508,7 @@ export class Table {
     return entry
   }
 
-  async listBlobPointers (key: string): Promise<BlobPointerRecord[]> {
+  async listBlobPointers (key: string): Promise<DbRecord<BlobPointer>[]> {
     await this.db.touch()
     return new Promise((resolve, reject) => {
       pump(
@@ -525,7 +526,7 @@ export class Table {
     })
   }
 
-  async getBlobPointer (key: string, blobName: string): Promise<BlobPointerRecord> {
+  async getBlobPointer (key: string, blobName: string): Promise<DbRecord<BlobPointer>> {
     await this.db.touch()
     const pointer = await this.getBlobsSub(key).get(blobName)
     if (!pointer) throw new Error('Blob not found')
@@ -534,19 +535,21 @@ export class Table {
     return pointer
   }
 
-  async isBlobCached (key: string, blobNameOrPointer: string|BlobPointerRecord): Promise<boolean> {
+  async isBlobCached (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>): Promise<boolean> {
     let pointer = blobNameOrPointer
     if (typeof pointer === 'string') {
       pointer = await this.getBlobPointer(key, pointer)
     }
+    if (!pointer.value) throw new Error('Blob not found')
     return this.db.blobs.isCached(pointer.value)
   }
 
-  async getBlob (key: string, blobNameOrPointer: string|BlobPointerRecord, encoding: BufferEncoding|undefined = undefined): Promise<{mimeType?: string, buf: Buffer|string}> {
+  async getBlob (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>, encoding: BufferEncoding|undefined = undefined): Promise<{mimeType?: string, buf: Buffer|string}> {
     let pointer = blobNameOrPointer
     if (typeof pointer === 'string') {
       pointer = await this.getBlobPointer(key, pointer)
     }
+    if (!pointer.value) throw new Error('Blob not found')
     const buf = await this.db.blobs.get(pointer.value)
     if (typeof blobNameOrPointer === 'string') {
       this.schema.assertBlobSizeValid(blobNameOrPointer, buf.length)
@@ -557,11 +560,12 @@ export class Table {
     }
   }
 
-  async createBlobReadStream (key: string, blobNameOrPointer: string|BlobPointerRecord): Promise<Readable> {
+  async createBlobReadStream (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>): Promise<Readable> {
     let pointer = blobNameOrPointer
     if (typeof pointer === 'string') {
       pointer = await this.getBlobPointer(key, pointer)
     }
+    if (!pointer.value) throw new Error('Blob not found')
     return this.db.blobs.createReadStream(pointer.value)
   }
 
@@ -570,6 +574,7 @@ export class Table {
     const pointers = await this.listBlobPointers(key)
     if (!pointers?.length) return
     for (const pointer of pointers) {
+      if (!pointer.value) continue
       try {
         this.schema.assertBlobMimeTypeValid(pointer.key, pointer.value.mimeType)
         blobPointer.assert(pointer.value)
@@ -607,14 +612,14 @@ export class Table {
   async delBlob (key: string, blobName: string): Promise<void> {
     blobName = String(blobName)
     const pointer = await this.getBlobPointer(key, blobName)
-    await this.db.blobs.decache(pointer.value)
+    if (pointer.value) await this.db.blobs.decache(pointer.value)
     await this.getBlobsSub(key).del(blobName)
   }
 
   async delAllBlobs (key: string): Promise<void> {
     const pointers = await this.listBlobPointers(key)
     for (const pointer of pointers) {
-      await this.db.blobs.decache(pointer.value)
+      if (pointer.value) await this.db.blobs.decache(pointer.value)
       await this.getBlobsSub(key).del(pointer.key)
     }
   }
@@ -638,7 +643,7 @@ export class Table {
     )
   }
 
-  async list (opts?: TableListOpts): Promise<DbRecord[]> {
+  async list<T> (opts?: TableListOpts): Promise<DbRecord<T>[]> {
     // no need to .touch() because createReadStream() does it
     opts = opts || {}
     opts.timeout = READ_TIMEOUT
@@ -654,7 +659,7 @@ export class Table {
     })
   }
 
-  async scanFind (opts: TableListOpts, fn: (record: DbRecord) => boolean): Promise<DbRecord|undefined> {
+  async scanFind<T> (opts: TableListOpts, fn: (record: DbRecord<T>) => boolean): Promise<DbRecord<T>|undefined> {
     // no need to .touch() because createReadStream() does it
     const rs = await this.createReadStream(opts)
     return new Promise((resolve, reject) => {
@@ -677,16 +682,16 @@ export class Table {
     })
   }
 
-  cursorRead (opts?: TableListOpts): ReadCursor {
+  cursorRead<T> (opts?: TableListOpts): ReadCursor<T> {
     // no need to .touch() because list() does it
     let lt = opts?.lt
     let atEnd = false
     return {
       opts,
       db: this.db,
-      next: async (limit?: number): Promise<DbRecord[]|null> => {
+      next: async (limit?: number): Promise<DbRecord<T>[]|null> => {
         if (atEnd) return null
-        const res = await this.list(Object.assign({}, opts, {lt, limit})).catch(e => [])
+        const res = await this.list<T>(Object.assign({}, opts, {lt, limit})).catch(e => [])
         if (res.length === 0) {
           atEnd = true
           return null
@@ -697,7 +702,7 @@ export class Table {
     }
   }
 
-  async listDiff (other: number): Promise<DbDiff[]> {
+  async listDiff<T> (other: number): Promise<DbDiff<T>[]> {
     if (!this.db.bee) throw new Error('Cannot listDiff: db is not hydrated')
     await this.db.touch()
     /**
@@ -726,7 +731,7 @@ export class Table {
           if (err) reject(err)
         }
       )
-    })) as DbDiff[]
+    })) as DbDiff<T>[]
     const prefix = `${this._schemaDomain}\x00${this._schemaName}\x00`
     return diffs.filter(diff => {
       const key = (diff?.right||diff?.left||{}).key

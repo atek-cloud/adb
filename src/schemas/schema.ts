@@ -1,29 +1,64 @@
 import createMlts from 'monotonic-lexicographic-timestamp'
-import { JsonPointer } from 'json-ptr'
-import { ValidationError } from '../lib/errors.js'
-import { ajv } from './util.js'
+import { TableDescription, TableSettings, TableTemplates } from '../gen/atek.cloud/adb-api.js'
+// import { ValidationError } from '../lib/errors.js'
+import { createTemplateFn, TemplateFunction, createValidator, Validator } from './util.js'
 
-const VALID_PTR_RESULT_TYPES = ['number', 'string', 'boolean']
 const mlts = createMlts()
 
-interface SchemaDef {
-  id: string
+interface TableTemplateFns {
+  table: {
+    title: TemplateFunction
+    description: TemplateFunction
+  }
+  record: {
+    key: TemplateFunction
+    title: TemplateFunction
+    description: TemplateFunction
+  }
 }
 
-export class Schema {
-  id: string
+export class TableSchema implements TableDescription {
+  tableId: string
+  revision?: number
+  templates?: TableTemplates
+  definition?: object
+  gen: TableTemplateFns
+  recordValidator?: Validator
 
-  constructor (def: SchemaDef) {
-    this.id = def.id
+  constructor (tableId: string, settings: TableSettings) {
+    this.tableId = tableId
+    this.revision = settings.revision
+    this.templates = settings.templates
+    this.definition = settings.definition
+
+    this.gen = {
+      table: {
+        title: createTemplateFn(this.templates?.table?.title, value => tableId),
+        description: createTemplateFn(this.templates?.table?.title, value => undefined)
+      },
+      record: {
+        key: createTemplateFn(this.templates?.table?.title, value => mlts()),
+        title: createTemplateFn(this.templates?.table?.title, value => undefined),
+        description: createTemplateFn(this.templates?.table?.title, value => undefined)
+      }
+    }
+
+    if (this.definition) {
+      this.recordValidator = createValidator(this.definition)
+    }
   }
 
-  validate (obj: any): boolean {
-    // TODO
+  validate (value: object): boolean {
+    if (this.recordValidator) {
+      return this.recordValidator.validate(value)
+    }
     return true
   }
 
-  assertValid (obj: any) {
-    // TODO
+  assertValid (value: object) {
+    if (this.recordValidator) {
+      return this.recordValidator.assert(value)
+    }
   }
 
   assertBlobMimeTypeValid (blobName: string, mimeType: string | undefined) {

@@ -1,46 +1,13 @@
 import * as hyperspace from './hyperspace.js'
-import { BaseHyperbeeDB, SetupOpts, NetworkSettings, Table } from './base.js'
-import * as schemas from '../schemas/index.js'
-import { HYPER_KEY, hyperUrlToKeyStr } from '../lib/strings.js'
-import { InvalidIdError } from '../lib/errors.js'
+import { BaseHyperbeeDB, SetupOpts, NetworkSettings, DbRecord } from './base.js'
+import { PrivateServerDB, ServiceDbConfig } from './private-server-db.js'
+import { HYPER_KEY, normalizeDbId } from '../lib/strings.js'
 import { CaseInsensitiveMap } from '../lib/map.js'
 import lock from '../lib/lock.js'
 
+import DatabaseRecordValue, { NetworkAccess } from '../gen/atek.cloud/database.js'
+
 const SWEEP_INACTIVE_DBS_INTERVAL = 10e3
-
-interface DatabaseRecordAccess {
-  appId?: string
-  alias?: string
-  persist?: boolean
-  presync?: boolean
-}
-
-interface DatabaseRecord {
-  key: string
-  value: {
-    dbId: string
-    cachedMeta?: {
-      displayName?: string
-      writable?: boolean
-    }
-    network?: NetworkSettings
-    access?: DatabaseRecordAccess[]
-    createdBy?: {
-      username?: string
-      appId?: string
-    },
-    createdAt?: string
-  }
-}
-
-interface CloudAppDb {
-  dbId: string // The database identifier.
-  displayName?: string // The user-friendly name of the database.
-  writable?: boolean // Is the database writable?
-  alias?: string // The alias ID of this database for this application.
-  persist: boolean // Does this application want to keep the database in storage?
-  presync: boolean // Does this application want the database to be fetched optimistically from the network?
-}
 
 enum DbInternalType {
   HYPERBEE = 'hyperbee'
@@ -64,10 +31,16 @@ export const dbs = new CaseInsensitiveMap<PrivateServerDB|GeneralDB>()
 // Initialize the database system. Must be called during setup.
 export async function setup(): Promise<void> {
   await hyperspace.setup()
-  await schemas.setup()
   
-  privateServerDb = new PrivateServerDB({key: process.env.ATEK_SERVER_DBID})
-  await privateServerDb.setup({create: !process.env.ATEK_SERVER_DBID})
+  if (process.env.ATEK_SERVER_DBID) {
+    privateServerDb = new PrivateServerDB({key: process.env.ATEK_SERVER_DBID})
+    await privateServerDb.setup({create: false})
+  } else if (process.env.ATEK_SERVER_DB_CREATE_NEW) {
+    privateServerDb = new PrivateServerDB({key: undefined})
+    await privateServerDb.setup({create: true})
+  } else {
+    throw new Error('No server database instructions provided. Please set ATEK_SERVER_DBID or ATEK_SERVER_DB_CREATE_NEW env variables.')
+  }
   if (privateServerDb.dbId) {
     dbs.set(privateServerDb.dbId, privateServerDb)
   }
@@ -105,16 +78,16 @@ export function getDbByDkey (dkey: string): PrivateServerDB|GeneralDB|undefined 
 }
 
 // Get or load a database.
-// The access settings by `appId` is tracked automatically in the database.
-export async function loadDb (appId: string, dbId: string): Promise<PrivateServerDB|GeneralDB|undefined> {
+// The access settings by `serviceId` is tracked automatically in the database.
+export async function loadDb (serviceId: string, dbId: string): Promise<PrivateServerDB|GeneralDB|undefined> {
   if (!privateServerDb || !privateServerDb.databases) {
     throw new Error('Cannot resolve alias: server db not available')
   }
-  if (!appId || !dbId) throw new Error(`Must provide appId and dbId to loadDb()`)
+  if (!serviceId || !dbId) throw new Error(`Must provide serviceId and dbId to loadDb()`)
   dbId = normalizeDbId(dbId)
   const release = await lock(`load-db:${dbId}`)
   try {
-    const dbRecord = (await privateServerDb.databases.get(dbId)) as DatabaseRecord
+    const dbRecord = (await privateServerDb.databases.get<DatabaseRecordValue>(dbId))
     let db = getDb(dbId)
     if (!db) {
       db = new GeneralDB({
@@ -124,8 +97,8 @@ export async function loadDb (appId: string, dbId: string): Promise<PrivateServe
       await db.setup({create: false})
       dbs.set(dbId, db)
     }
-    if (appId !== 'system' && !dbRecord?.value?.access?.find(a => a.appId === appId)) {
-      await privateServerDb.configureAppDbAccess(appId, dbId, {persist: false})
+    if (serviceId !== 'system' && !dbRecord?.value?.services?.find(a => a.serviceId === serviceId)) {
+      await privateServerDb.configureServiceDbAccess(serviceId, dbId, {persist: false})
     }
     return db
   } catch (e) {
@@ -138,23 +111,23 @@ export async function loadDb (appId: string, dbId: string): Promise<PrivateServe
 }
 
 // Resolves an app's db alias to its dbId
-export async function resolveAlias (appId: string, alias: string): Promise<string|undefined> {
+export async function resolveAlias (serviceId: string, alias: string): Promise<string|undefined> {
   if (!privateServerDb || !privateServerDb.databases) {
     throw new Error('Cannot resolve alias: server db not available')
   }
   if (HYPER_KEY.test(alias)) return alias
-  const dbRecords = (await privateServerDb.databases.list()) as DatabaseRecord[]
-  const dbRecord = dbRecords.find(r => r.value.access?.find(a => a.appId === appId && a.alias === alias))
-  if (dbRecord) {
+  const dbRecords = await privateServerDb.databases.list<DatabaseRecordValue>()
+  const dbRecord = dbRecords.find(r => r.value?.services?.find(a => a.serviceId === serviceId && a.alias === alias))
+  if (dbRecord?.value) {
     return dbRecord.value.dbId
   }
 }
 
-export async function createDb (appId: string, opts: DbSettings): Promise<GeneralDB> {
+export async function createDb (serviceId: string, opts: DbSettings): Promise<GeneralDB> {
   if (!privateServerDb) {
     throw new Error('Cannot create new db: server db not available')
   }
-  const netAccess = opts.network?.access || 'public'
+  const netAccess = (opts.network?.access || 'public') as NetworkAccess
   const db = new GeneralDB({network: {access: netAccess}})
   await db.setup({
     create: true,
@@ -167,9 +140,10 @@ export async function createDb (appId: string, opts: DbSettings): Promise<Genera
   if (db.dbId) {
     dbs.set(db.dbId, db)
     await privateServerDb.updateDbRecord(db.dbId, dbRecord => {
+      if (!dbRecord.value) return false
       dbRecord.value.network = {access: netAccess}
-      dbRecord.value.access = [{appId, alias: opts.alias, persist: true}]
-      dbRecord.value.createdBy = {appId}
+      dbRecord.value.services = [{serviceId, alias: opts.alias, persist: true}]
+      dbRecord.value.createdBy = {serviceId}
       dbRecord.value.createdAt = (new Date()).toISOString()
       return true
     })
@@ -178,16 +152,16 @@ export async function createDb (appId: string, opts: DbSettings): Promise<Genera
 }
 
 // Get a database by an application's alias ID. If a db does not exist at that alias, this function will create one.
-export async function getOrCreateDbByAlias (appId: string, alias: string, settings: DbSettings): Promise<PrivateServerDB|GeneralDB> {
+export async function getOrCreateDbByAlias (serviceId: string, alias: string, settings: DbSettings): Promise<PrivateServerDB|GeneralDB> {
   const release = await lock(`get-or-create-db:${alias}`)
   try {
-    const dbId = await resolveAlias(appId, alias)
+    const dbId = await resolveAlias(serviceId, alias)
     if (dbId) {
-      const db = await loadDb(appId, dbId)
+      const db = await loadDb(serviceId, dbId)
       if (!db) throw new Error(`Failed to load database: ${alias} (${dbId})`)
       return db
     } else {
-      return createDb(appId, Object.assign({}, settings, {alias}))
+      return createDb(serviceId, Object.assign({}, settings, {alias}))
     }
   } finally {
     release()
@@ -195,24 +169,24 @@ export async function getOrCreateDbByAlias (appId: string, alias: string, settin
 }
 
 // List databases attached to an application.
-export function listAppDbs (appId: string): Promise<CloudAppDb[]> {
+export function listServiceDbs (serviceId: string): Promise<ServiceDbConfig[]> {
   if (!privateServerDb) {
     throw new Error('Cannot list app db records: server db not available')
   }
-  return privateServerDb.listAppDbs(appId)
+  return privateServerDb.listServiceDbs(serviceId)
 }
 
 // Update the configuration of a database's attachment to an application.
-export async function configureAppDbAccess (appId: string, dbId: string, config: {persist?: boolean, presync?: boolean} = {}): Promise<DatabaseRecord> {
+export async function configureServiceDbAccess (serviceId: string, dbId: string, config: {persist?: boolean, presync?: boolean} = {}): Promise<DbRecord<DatabaseRecordValue>> {
   if (!privateServerDb) {
     throw new Error('Cannot configure app db access: server db not available')
   }
   if (!HYPER_KEY.test(dbId)) {
-    const resolvedDbId = await resolveAlias(appId, dbId)
+    const resolvedDbId = await resolveAlias(serviceId, dbId)
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  return privateServerDb.configureAppDbAccess(appId, dbId, config)
+  return privateServerDb.configureServiceDbAccess(serviceId, dbId, config)
 }
 
 // Waits for all databases to finish their sync events.
@@ -236,15 +210,6 @@ export async function whenAllSynced (): Promise<void> {
 // internal methods
 // =
 
-// Ensure that dbId is a valid identifer and normalize it to the hex-string key.
-function normalizeDbId (dbId: string): string {
-  if (!dbId || typeof dbId !== 'string') throw new InvalidIdError(`Invalid database ID: ${dbId}`)
-  if (dbId.startsWith('hyper://')) {
-    dbId = hyperUrlToKeyStr(dbId) || dbId
-  }
-  if (!HYPER_KEY.test(dbId)) throw new InvalidIdError(`Invalid database ID: ${dbId}`)
-  return dbId
-}
 
 // Looks for any databases which are not in use and unloads them.
 async function sweepInactiveDbs (): Promise<void> {
@@ -256,136 +221,7 @@ async function sweepInactiveDbs (): Promise<void> {
   }
 }
 
-class PrivateServerDB extends BaseHyperbeeDB {
-  accounts: Table | undefined
-  accountSessions: Table |  undefined
-  apps: Table |  undefined
-  appProfileSessions: Table |  undefined
-  databases: Table |  undefined
-
-  constructor ({key}: {key: string|undefined}) {
-    super({
-      key,
-      network: {access: 'private'}
-    })
-  }
-
-  isEjectableFromMemory (ts: number) {
-    return false // never eject the private server db from memory
-  }
-
-  async setup (opts: SetupOpts) {
-    await super.setup(opts)
-    this.accounts = this.getTable('ctzn.network/account')
-    this.accountSessions = this.getTable('ctzn.network/account-session')
-    this.apps = this.getTable('ctzn.network/application')
-    this.appProfileSessions = this.getTable('ctzn.network/app-profile-session')
-    this.databases = this.getTable('ctzn.network/database')
-  }
-  
-  async onDatabaseCreated () {
-    console.log('New private server database created, key:', this.dbId)
-    await this.updateDesc({displayName: 'Server Registry'})
-  }
-
-  // List databases attached to an application.
-  async listAppDbs (appId: string): Promise<CloudAppDb[]> {
-    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
-    const databases: CloudAppDb[] = []
-    const dbRecords = (await this.databases.list()) as DatabaseRecord[]
-    for (const dbRecord of dbRecords) {
-      const access = dbRecord.value.access?.find(a => a.appId === appId)
-      if (access) {
-        databases.push({
-          dbId: dbRecord.value.dbId,
-          displayName: dbRecord.value.cachedMeta?.displayName,
-          writable: dbRecord.value.cachedMeta?.writable,
-          alias: access.alias,
-          persist: access.persist || false,
-          presync: access.presync || false
-        })
-      }
-    }
-    return databases
-  }
-
-  // Update a database's record.
-  async updateDbRecord (dbId: string, updateFn: (record: DatabaseRecord) => boolean): Promise<DatabaseRecord> {
-    if (!this.databases) throw new Error('Cannot update db record: this database is not setup')
-    dbId = normalizeDbId(dbId)
-    const release = await this.databases.lock(dbId)
-    try {
-      let isNew = false
-      let dbRecord = (await this.databases.get(dbId)) as DatabaseRecord
-      if (!dbRecord) {
-        const db = await loadDb('system', dbId)
-        if (!db) throw new Error(`Failed to load database: ${dbId}`)
-        isNew = true
-        dbRecord = {
-          key: dbId,
-          value: {
-            dbId,
-            cachedMeta: {
-              displayName: db.displayName,
-              writable: db.writable
-            },
-            access: [],
-            createdBy: {appId: '', username: ''},
-            createdAt: ''
-          }
-        }
-      }
-      const wasChanged = updateFn(dbRecord)
-      if (wasChanged !== false || isNew) {
-        await this.databases.put(dbRecord.key, dbRecord.value)
-      }
-      return dbRecord
-    } finally {
-      release()
-    }
-  }
-
-  // Update a database record's cached metadata.
-  updateDbRecordCachedMeta (db: PrivateServerDB|GeneralDB|BaseHyperbeeDB): Promise<DatabaseRecord> {
-    if (!db.dbId) throw new Error('Cannot update record cached meta: database not hydrated')
-    return this.updateDbRecord(db.dbId, dbRecord => {
-      if (!dbRecord.value.cachedMeta) {
-        dbRecord.value.cachedMeta = {}
-      }
-      if (
-        (dbRecord.value.cachedMeta.displayName === db.displayName)
-        && (dbRecord.value.cachedMeta.writable === db.writable)
-      ) {
-        return false
-      }
-      dbRecord.value.cachedMeta.displayName = db.displayName
-      dbRecord.value.cachedMeta.writable = db.writable
-      return true
-    })
-  }
-
-  // Update the configuration of a database's attachment to an application.
-  configureAppDbAccess (appId: string, dbId: string, config: DatabaseRecordAccess = {}): Promise<DatabaseRecord> {
-    return this.updateDbRecord(dbId, dbRecord => {
-      if (!dbRecord.value.access) dbRecord.value.access = []
-      let access = dbRecord.value.access.find(a => a.appId === appId)
-      if (!access) {
-        access = {
-          appId,
-          persist: false,
-          presync: false
-        }
-        dbRecord.value.access.push(access)
-      }
-
-      if (typeof config.persist === 'boolean') access.persist = config.persist
-      if (typeof config.presync === 'boolean') access.presync = config.presync
-      return true
-    })
-  }
-}
-
-class GeneralDB extends BaseHyperbeeDB {
+export class GeneralDB extends BaseHyperbeeDB {
   async setup (opts: SetupOpts) {
     await super.setup(opts)
     await this.blobs.setup()

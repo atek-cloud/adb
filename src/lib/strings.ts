@@ -1,4 +1,5 @@
 import { URL } from 'url'
+import { InvalidIdError } from './errors.js'
 
 export const HYPER_KEY = /([0-9a-f]{64})/i
 export const HYPER_KEY_ONLY = /^([0-9a-f]{64})$/i
@@ -23,6 +24,16 @@ export function isHyperUrl (str: string): boolean {
 
 export function isHyperKey (str: string): boolean {
   return HYPER_KEY_ONLY.test(String(str))
+}
+
+// Ensure that dbId is a valid identifer and normalize it to the hex-string key.
+export function normalizeDbId (dbId: string): string {
+  if (!dbId || typeof dbId !== 'string') throw new InvalidIdError(`Invalid database ID: ${dbId}`)
+  if (dbId.startsWith('hyper://')) {
+    dbId = hyperUrlToKeyStr(dbId) || dbId
+  }
+  if (!HYPER_KEY.test(dbId)) throw new InvalidIdError(`Invalid database ID: ${dbId}`)
+  return dbId
 }
 
 export function toOrigin (url: string): string {
