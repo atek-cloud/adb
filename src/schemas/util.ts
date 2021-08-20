@@ -13,7 +13,7 @@ export interface Validator {
 }
 
 export interface TemplateFunction {
-  (value: object): string|undefined
+  (value: object): string
 }
 
 export function createValidator (schema: object): Validator {

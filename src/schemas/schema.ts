@@ -34,12 +34,12 @@ export class TableSchema implements TableDescription {
     this.gen = {
       table: {
         title: createTemplateFn(this.templates?.table?.title, value => tableId),
-        description: createTemplateFn(this.templates?.table?.title, value => undefined)
+        description: createTemplateFn(this.templates?.table?.title, value => '')
       },
       record: {
         key: createTemplateFn(this.templates?.table?.title, value => mlts()),
-        title: createTemplateFn(this.templates?.table?.title, value => undefined),
-        description: createTemplateFn(this.templates?.table?.title, value => undefined)
+        title: createTemplateFn(this.templates?.table?.title, value => ''),
+        description: createTemplateFn(this.templates?.table?.title, value => '')
       }
     }
 
@@ -67,6 +67,11 @@ export class TableSchema implements TableDescription {
 
   assertBlobSizeValid (blobName: string, len: number) {
     // TODO
+  }
+
+  get hasCreatedAt () {
+    // @ts-ignore Yeah yeah yeah objects are useless types
+    return (this.definition && (this.definition.properties?.createdAt || this.definition.oneOf?.every?.(obj => obj.properties.createdAt)))
   }
 
   // TODO

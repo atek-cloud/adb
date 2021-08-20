@@ -1,70 +1,160 @@
 import createExpressApp, * as express from 'express'
 import bodyParser from 'body-parser'
-import * as db from './db/index.js'
-import { DbDescription, Record, BlobMap, BlobDesc, Diff } from './gen/atek.cloud/adb-api.js'
+import * as dbs from './db/index.js'
+import { joinPath } from './lib/strings.js'
+import { DbDescription, Record, BlobMap, BlobDesc, Diff, ListOpts, TableSettings, TableDescription } from './gen/atek.cloud/adb-api.js'
 import AdbApiServer from './gen/atek.cloud/adb-api.server.js'
 import AdbCtrlApiServer from './gen/atek.cloud/adb-ctrl-api.server.js'
 
 setup()
 
 async function setup () {
-  await db.setup()
+  await dbs.setup()
 
   const adbCtrlApiServer = new AdbCtrlApiServer({
     getServerDatabaseId (): Promise<string> {
-      return Promise.resolve(db.privateServerDb?.dbId || '')
+      return Promise.resolve(dbs.privateServerDb?.dbId || '')
     }
   })
 
   const adbApiServer = new AdbApiServer({
     // Get metadata and information about a database.
-    describe (dbId: string): Promise<DbDescription> {
-      throw "TODO"
+    async describe (dbId: string): Promise<DbDescription> {
+      const db = await dbs.loadDb('system', dbId)
+      return {
+        dbId,
+        dbType: 'hyperbee',
+        displayName: db.displayName,
+        tables: Object.values(db.tables).map(t => ({
+          tableId: t.schema.tableId,
+          revision: t.schema.revision,
+          templates: t.schema.templates,
+          definition: t.schema.definition
+        }))
+      }
+    },
+
+    // Register a table's schema and metadata. 
+    async table (dbId: string, tableId: string, desc: TableSettings): Promise<TableDescription> {
+      const db = await dbs.loadDb('system', dbId)
+      const schema = db.table(tableId, desc).schema
+      return {
+        tableId: schema.tableId,
+        revision: schema.revision,
+        templates: schema.templates,
+        definition: schema.definition
+      }
     },
 
     // List records in a table.
-    list (dbId: string, tableId: string): Promise<{records: Record[]}> {
-      throw "TODO"
+    async list (dbId: string, tableId: string, opts?: ListOpts): Promise<{records: Record[]}> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      const records = await table.list<object>(opts)
+      return {
+        records: records.map(record => ({
+          key: record.key,
+          path: `/${joinPath(tableId, record.key)}`,
+          url: joinPath(db.url, tableId, record.key),
+          seq: record.seq,
+          value: record.value
+        }))
+      }
     },
 
     // Get a record in a table.
-    get (dbId: string, tableId: string, key: string): Promise<Record> {
-      throw "TODO"
+    async get (dbId: string, tableId: string, key: string): Promise<Record> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      const record = await table.get<object>(key)
+      return {
+        key: record.key,
+        path: `/${joinPath(tableId, record.key)}`,
+        url: joinPath(db.url, tableId, record.key),
+        seq: record.seq,
+        value: record.value
+      }
     },
 
     // Add a record to a table.
-    create (dbId: string, tableId: string, value: object, blobs?: BlobMap): Promise<Record> {
-      throw "TODO"
+    async create (dbId: string, tableId: string, value: object, blobs?: BlobMap): Promise<Record> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      
+      // TODO
+      // table.schema.assertBlobMimeTypeValid(file.fieldname, file.mimetype)
+      // table.schema.assertBlobSizeValid(file.fieldname, file.buffer.length)
+
+      const key = table.schema.gen.record.key(value)
+      if (value && typeof value === 'object' && !('createdAt' in value) && table.schema.hasCreatedAt) {
+        Object.assign(value, {
+          createdAt: (new Date()).toISOString()
+        })
+      }
+      await table.put(key, value)
+
+      if (blobs && Object.keys(blobs).length) {
+        for (const blobName in blobs) {
+          await table.putBlob(key, blobName, blobs[blobName].buf, {mimeType: blobs[blobName].mimeType})
+        }
+      }
+
+      return {
+        key: key,
+        path: `/${joinPath(tableId, key)}`,
+        url: joinPath(db.url, tableId, key),
+        seq: undefined, // TODO needed?
+        value
+      }
     },
 
     // Write a record to a table.
-    put (dbId: string, tableId: string, key: string, value: object): Promise<Record> {
-      throw "TODO"
+    async put (dbId: string, tableId: string, key: string, value: object): Promise<Record> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      await table.put(key, value)
+      return {
+        key: key,
+        path: `/${joinPath(tableId, key)}`,
+        url: joinPath(db.url, tableId, key),
+        seq: undefined, // TODO needed?
+        value
+      }
     },
     
     // Delete a record from a table.
-    delete (dbId: string, tableId: string, key: string): Promise<void> {
-      throw "TODO"
+    async delete (dbId: string, tableId: string, key: string): Promise<void> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      await table.del(key)
     },
     
     // Enumerate the differences between two versions of the database.
-    diff (dbId: string, opts: {left: number, right?: number, tableIds?: string[]}): Promise<Diff[]> {
+    async diff (dbId: string, opts: {left: number, right?: number, tableIds?: string[]}): Promise<Diff[]> {
+      // TODO
       throw "TODO"
     },
 
     // Get a blob of a record.
-    getBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<Buffer> {
-      throw "TODO"
+    async getBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<Buffer> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      const {buf} = await table.getBlob(key, blobName, 'binary')
+      return buf as Buffer
     },
     
     // Write a blob of a record.
-    putBlob (dbId: string, tableId: string, key: string, blobName: string, blobValue: BlobDesc): Promise<void> {
-      throw "TODO"
+    async putBlob (dbId: string, tableId: string, key: string, blobName: string, blobValue: BlobDesc): Promise<void> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      await table.putBlob(key, blobName, blobValue.buf, {mimeType: blobValue.mimeType})
     },
     
     // Delete a blob of a record.
-    delBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<void> {
-      throw "TODO"
+    async delBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<void> {
+      const db = await dbs.loadDb('system', dbId)
+      const table = db.table(tableId)
+      await table.delBlob(key, blobName)
     }
   })
 

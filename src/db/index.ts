@@ -79,7 +79,7 @@ export function getDbByDkey (dkey: string): PrivateServerDB|GeneralDB|undefined 
 
 // Get or load a database.
 // The access settings by `serviceId` is tracked automatically in the database.
-export async function loadDb (serviceId: string, dbId: string): Promise<PrivateServerDB|GeneralDB|undefined> {
+export async function loadDb (serviceId: string, dbId: string): Promise<PrivateServerDB|GeneralDB> {
   if (!privateServerDb || !privateServerDb.databases) {
     throw new Error('Cannot resolve alias: server db not available')
   }
@@ -104,7 +104,7 @@ export async function loadDb (serviceId: string, dbId: string): Promise<PrivateS
   } catch (e) {
     console.error('Failed to load database dbId:', dbId)
     console.error(e)
-    return undefined
+    throw `Failed to load database dbId: ${dbId}`
   } finally {
     release()
   }
