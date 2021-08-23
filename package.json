@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@atek-cloud/node-rpc": "^1.0.0",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",
     "body-parser": "^1.19.0",
