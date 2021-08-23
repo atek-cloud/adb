@@ -5,6 +5,7 @@ import { HYPER_KEY, normalizeDbId } from '../lib/strings.js'
 import { CaseInsensitiveMap } from '../lib/map.js'
 import lock from '../lib/lock.js'
 
+import { AdbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
 import DatabaseRecordValue, { NetworkAccess } from '../gen/atek.cloud/database.js'
 
 const SWEEP_INACTIVE_DBS_INTERVAL = 10e3
@@ -29,18 +30,15 @@ export const dbs = new CaseInsensitiveMap<PrivateServerDB|GeneralDB>()
 
 
 // Initialize the database system. Must be called during setup.
-export async function setup(): Promise<void> {
+export async function setup(settings: AdbSettings): Promise<void> {
+  if (privateServerDb) {
+    throw new Error('ADB has already been initialized')
+  }
+
   await hyperspace.setup()
   
-  if (process.env.ATEK_SERVER_DBID) {
-    privateServerDb = new PrivateServerDB({key: process.env.ATEK_SERVER_DBID})
-    await privateServerDb.setup({create: false})
-  } else if (process.env.ATEK_SERVER_DB_CREATE_NEW) {
-    privateServerDb = new PrivateServerDB({key: undefined})
-    await privateServerDb.setup({create: true})
-  } else {
-    throw new Error('No server database instructions provided. Please set ATEK_SERVER_DBID or ATEK_SERVER_DB_CREATE_NEW env variables.')
-  }
+  privateServerDb = new PrivateServerDB({key: settings.serverDbId})
+  await privateServerDb.setup({create: !settings.serverDbId})
   if (privateServerDb.dbId) {
     dbs.set(privateServerDb.dbId, privateServerDb)
   }
