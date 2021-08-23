@@ -23,7 +23,8 @@ export function createValidator (schema: object): Validator {
     assert: (value: any) => {
       const valid = validate(value)
       if (!valid) {
-        throw new ValidationError(`${validate.errors?.[0].propertyName} ${validate.errors?.[0].message}`)
+        const what = validate.errors?.[0].propertyName || validate.errors?.[0].instancePath
+        throw new ValidationError(`${what} ${validate.errors?.[0].message}`)
       }
     }
   }
