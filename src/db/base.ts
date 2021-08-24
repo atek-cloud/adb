@@ -53,7 +53,7 @@ export interface BlobPointer {
 export interface DbRecord<T> {
   seq?: number
   key: string
-  value: T | undefined | null
+  value: T
 }
 
 export interface DbDiff<T> {

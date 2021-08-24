@@ -100,6 +100,7 @@ const adbApiServer = new AdbApiServer({
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     const record = await table.get<object>(key)
+    if (!record) throw new Error(`Not found: ${key}`)
     return {
       key: record.key,
       path: `/${joinPath(tableId, record.key)}`,

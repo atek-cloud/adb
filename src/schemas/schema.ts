@@ -34,12 +34,12 @@ export class TableSchema implements TableDescription {
     this.gen = {
       table: {
         title: createTemplateFn(this.templates?.table?.title, value => tableId),
-        description: createTemplateFn(this.templates?.table?.title, value => '')
+        description: createTemplateFn(this.templates?.table?.description, value => '')
       },
       record: {
-        key: createTemplateFn(this.templates?.table?.title, value => mlts()),
-        title: createTemplateFn(this.templates?.table?.title, value => ''),
-        description: createTemplateFn(this.templates?.table?.title, value => '')
+        key: createTemplateFn(this.templates?.record?.key, value => mlts()),
+        title: createTemplateFn(this.templates?.record?.title, value => ''),
+        description: createTemplateFn(this.templates?.record?.description, value => '')
       }
     }
 

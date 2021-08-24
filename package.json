@@ -23,7 +23,7 @@
   "author": "Paul Frazee <pfrazee@gmail.com>",
   "license": "MIT",
   "dependencies": {
-    "@atek-cloud/node-rpc": "^1.0.0",
+    "@atek-cloud/node-rpc": "^1.1.1",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",
     "body-parser": "^1.19.0",

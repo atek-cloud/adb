@@ -32,20 +32,24 @@ export function createValidator (schema: object): Validator {
 
 export function createTemplateFn (template: string|undefined, defFn: TemplateFunction): TemplateFunction {
   if (!template) return defFn
-  const parts = template.split(/(\{\{|\}\})/g)
+  const parts = template.split(/(\{\{|\}\})/g).filter(part => part !== '{{' && part !== '}}')
   if (parts.length % 2 !== 1) {
     throw new Error('Invalid template: unbalanced {{ }} brackets')
   }
   const fns = parts.map((part, i) => {
-    if (i % 2 === 0) return (value: object) => part
+    if (i % 2 === 0) {
+      return (value: object) => part
+    }
     const ptr = JsonPointer.create(part)
     return (value: object) => {
       const res = ptr.get(value)
       if (!VALID_PTR_RESULT_TYPES.includes(typeof res)) {
         throw new Error(`Unable to generate key, ${part} found type ${typeof res}`)
       }
-      return value
+      return res
     }
   })
-  return (value: object) => fns.map(fn => fn(value)).join('')
+  return (value: object) => {
+    return fns.map(fn => fn(value)).join('')
+  }
 }
