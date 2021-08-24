@@ -1,15 +1,10 @@
 import { BaseHyperbeeDB, SetupOpts, DbRecord, Table } from './base.js'
 import { loadDb, GeneralDB } from './index.js'
 import { normalizeDbId } from '../lib/strings.js'
+import { defined } from '../lib/functions.js'
 
 import DatabaseRecordValue, * as DatabaseRecords from '../gen/atek.cloud/database.js'
-
-export interface DatabaseRecordAccess {
-  serviceId?: string
-  alias?: string
-  persist?: boolean
-  presync?: boolean
-}
+import { DbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
 
 export interface ServiceDbConfig {
   dbId: string // The database identifier.
@@ -46,6 +41,26 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   async onDatabaseCreated () {
     console.log('New private server database created, key:', this.dbId)
     await this.updateDesc({displayName: 'Server Registry'})
+  }
+
+  // Get database config attached to an application.
+  async getServiceDb (serviceId: string, dbId: string): Promise<ServiceDbConfig> {
+    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
+    const dbRecord = await this.databases.get<DatabaseRecordValue>(dbId)
+    if (dbRecord?.value) {
+      const access = dbRecord.value.services?.find(a => a.serviceId === serviceId)
+      if (access) {
+        return {
+          dbId: dbRecord.value.dbId,
+          displayName: dbRecord.value.cachedMeta?.displayName,
+          writable: dbRecord.value.cachedMeta?.writable,
+          alias: access.alias,
+          persist: access.persist || false,
+          presync: access.presync || false
+        }
+      }
+    }
+    throw new Error('No config for this database found')
   }
 
   // List databases attached to an application.
@@ -127,7 +142,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update the configuration of a database's attachment to an application.
-  configureServiceDbAccess (serviceId: string, dbId: string, config: DatabaseRecordAccess = {}): Promise<DbRecord<DatabaseRecordValue>> {
+  configureServiceDbAccess (serviceId: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<DatabaseRecordValue>> {
     return this.updateDbRecord(dbId, dbRecord => {
       if (!dbRecord.value) return false
       if (!dbRecord.value.services) dbRecord.value.services = []
@@ -141,8 +156,10 @@ export class PrivateServerDB extends BaseHyperbeeDB {
         dbRecord.value.services.push(access)
       }
 
-      if (typeof config.persist === 'boolean') access.persist = config.persist
-      if (typeof config.presync === 'boolean') access.presync = config.presync
+      if (defined(config.alias)) access.alias = config.alias
+      if (defined(config.persist)) access.persist = config.persist
+      if (defined(config.presync)) access.presync = config.presync
+      
       return true
     })
   }

@@ -14,6 +14,7 @@ import bytes from 'bytes'
 import lock from '../lib/lock.js'
 import { constructEntryUrl } from '../lib/strings.js'
 import { TableSettings } from '../gen/atek.cloud/adb-api.js'
+import { NetworkSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
 
 const READ_TIMEOUT = 10e3
 const BACKGROUND_INDEXING_DELAY = 5e3 // how much time is allowed to pass before globally indexing an update
@@ -30,10 +31,6 @@ interface FeedInfo {
 interface BeeInfo {
   writable: boolean
   discoveryKey?: Buffer
-}
-
-export interface NetworkSettings {
-  access?: string
 }
 
 export interface BaseHyperbeeDBOpts {

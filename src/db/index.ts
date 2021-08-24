@@ -1,26 +1,15 @@
 import * as hyperspace from './hyperspace.js'
-import { BaseHyperbeeDB, SetupOpts, NetworkSettings, DbRecord } from './base.js'
+import { BaseHyperbeeDB, SetupOpts, DbRecord } from './base.js'
 import { PrivateServerDB, ServiceDbConfig } from './private-server-db.js'
 import { HYPER_KEY, normalizeDbId } from '../lib/strings.js'
 import { CaseInsensitiveMap } from '../lib/map.js'
 import lock from '../lib/lock.js'
+import { defined } from '../lib/functions.js'
 
-import { AdbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
+import { AdbProcessConfig, DbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
 import DatabaseRecordValue, { NetworkAccess } from '../gen/atek.cloud/database.js'
 
 const SWEEP_INACTIVE_DBS_INTERVAL = 10e3
-
-enum DbInternalType {
-  HYPERBEE = 'hyperbee'
-}
-
-interface DbSettings {
-  type?: DbInternalType
-  alias?: string // An alias ID for the application to reference the database.
-  displayName?: string // The database's display name.
-  tables?: string[] // The database's initial configured tables.
-  network?: NetworkSettings // The database's network settings.
-}
 
 // exported api
 // =
@@ -30,7 +19,7 @@ export const dbs = new CaseInsensitiveMap<PrivateServerDB|GeneralDB>()
 
 
 // Initialize the database system. Must be called during setup.
-export async function setup(settings: AdbSettings): Promise<void> {
+export async function setup(settings: AdbProcessConfig): Promise<void> {
   if (privateServerDb) {
     throw new Error('ADB has already been initialized')
   }
@@ -90,7 +79,7 @@ export async function loadDb (serviceId: string, dbId: string): Promise<PrivateS
     if (!db) {
       db = new GeneralDB({
         key: dbId,
-        network: dbRecord.value?.network || {access: 'public'}
+        network: dbRecord?.value?.network || {access: 'public'}
       })
       await db.setup({create: false})
       dbs.set(dbId, db)
@@ -140,7 +129,12 @@ export async function createDb (serviceId: string, opts: DbSettings): Promise<Ge
     await privateServerDb.updateDbRecord(db.dbId, dbRecord => {
       if (!dbRecord.value) return false
       dbRecord.value.network = {access: netAccess}
-      dbRecord.value.services = [{serviceId, alias: opts.alias, persist: true}]
+      dbRecord.value.services = [{
+        serviceId,
+        alias: opts.alias,
+        persist: defined(opts.persist) ? opts.persist : true,
+        presync: defined(opts.presync) ? opts.presync : false
+      }]
       dbRecord.value.createdBy = {serviceId}
       dbRecord.value.createdAt = (new Date()).toISOString()
       return true
@@ -175,7 +169,7 @@ export function listServiceDbs (serviceId: string): Promise<ServiceDbConfig[]> {
 }
 
 // Update the configuration of a database's attachment to an application.
-export async function configureServiceDbAccess (serviceId: string, dbId: string, config: {persist?: boolean, presync?: boolean} = {}): Promise<DbRecord<DatabaseRecordValue>> {
+export async function configureServiceDbAccess (serviceId: string, dbId: string, settings: DbSettings): Promise<DbRecord<DatabaseRecordValue>> {
   if (!privateServerDb) {
     throw new Error('Cannot configure app db access: server db not available')
   }
@@ -184,7 +178,26 @@ export async function configureServiceDbAccess (serviceId: string, dbId: string,
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  return privateServerDb.configureServiceDbAccess(serviceId, dbId, config)
+  const res = await privateServerDb.configureServiceDbAccess(serviceId, dbId, settings)
+
+  if (defined(settings.displayName)) {
+    const db = await loadDb(serviceId, dbId)
+    await db.updateDesc({displayName: settings.displayName})
+  }
+
+  return res
+}
+
+export async function getServiceDbConfig (serviceId: string, dbId: string): Promise<ServiceDbConfig> {
+  if (!privateServerDb) {
+    throw new Error('Cannot get app db access: server db not available')
+  }
+  if (!HYPER_KEY.test(dbId)) {
+    const resolvedDbId = await resolveAlias(serviceId, dbId)
+    if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
+    dbId = resolvedDbId
+  }
+  return privateServerDb.getServiceDb(serviceId, dbId)
 }
 
 // Waits for all databases to finish their sync events.

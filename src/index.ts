@@ -4,18 +4,49 @@ import * as dbs from './db/index.js'
 import { joinPath } from './lib/strings.js'
 import { DbDescription, Record, BlobMap, BlobDesc, Diff, ListOpts, TableSettings, TableDescription } from './gen/atek.cloud/adb-api.js'
 import AdbApiServer from './gen/atek.cloud/adb-api.server.js'
-import { AdbSettings } from './gen/atek.cloud/adb-ctrl-api.js'
+import { AdbProcessConfig, DbSettings, DbInfo } from './gen/atek.cloud/adb-ctrl-api.js'
 import AdbCtrlApiServer from './gen/atek.cloud/adb-ctrl-api.server.js'
 
 const adbCtrlApiServer = new AdbCtrlApiServer({
-  init (settings: AdbSettings): Promise<void> {
-    return dbs.setup(settings)
+  // Initialize the ADB process
+  init (config: AdbProcessConfig): Promise<void> {
+    return dbs.setup(config)
   },
 
-  getConfig (): Promise<AdbSettings> {
+  // Get the ADB process configuration
+  getConfig (): Promise<AdbProcessConfig> {
     return Promise.resolve({
       serverDbId: dbs.privateServerDb?.dbId || ''
     })
+  },
+
+  // Create a new database
+  async createDb (settings: DbSettings): Promise<DbInfo> {
+    const db = await dbs.createDb('system', settings)
+    if (!db?.dbId) throw new Error('Failed to create database')
+    return {dbId: db.dbId}
+  },
+
+  // Get or create a database according to an alias. Database aliases are local to each application.
+  async getOrCreateDb (alias: string, settings: DbSettings): Promise<DbInfo> {
+    const db = await dbs.getOrCreateDbByAlias('system', alias, settings)
+    if (!db?.dbId) throw new Error('Failed to get or create database')
+    return {dbId: db.dbId}
+  },
+
+  // Configure a database's settings
+  async configureDb (dbId: string, settings: DbSettings): Promise<void> {
+    await dbs.configureServiceDbAccess('system', dbId, settings)
+  },
+
+  // Configure a database's settings
+  getDbConfig (dbId: string): Promise<DbSettings> {
+    return dbs.getServiceDbConfig('system', dbId)
+  },
+
+  // Configure a database's settings
+  listDbs (): Promise<DbSettings[]> {
+    return dbs.listServiceDbs('service')
   }
 })
 
