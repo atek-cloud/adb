@@ -65,12 +65,12 @@ export function getDbByDkey (dkey: string): PrivateServerDB|GeneralDB|undefined 
 }
 
 // Get or load a database.
-// The access settings by `serviceId` is tracked automatically in the database.
-export async function loadDb (serviceId: string, dbId: string): Promise<PrivateServerDB|GeneralDB> {
+// The access settings by `serviceKey` is tracked automatically in the database.
+export async function loadDb (serviceKey: string, dbId: string): Promise<PrivateServerDB|GeneralDB> {
   if (!privateServerDb || !privateServerDb.databases) {
     throw new Error('Cannot resolve alias: server db not available')
   }
-  if (!serviceId || !dbId) throw new Error(`Must provide serviceId and dbId to loadDb()`)
+  if (!serviceKey || !dbId) throw new Error(`Must provide serviceKey and dbId to loadDb()`)
   dbId = normalizeDbId(dbId)
   const release = await lock(`load-db:${dbId}`)
   try {
@@ -84,8 +84,8 @@ export async function loadDb (serviceId: string, dbId: string): Promise<PrivateS
       await db.setup({create: false})
       dbs.set(dbId, db)
     }
-    if (serviceId !== 'system' && !dbRecord?.value?.services?.find(a => a.serviceId === serviceId)) {
-      await privateServerDb.configureServiceDbAccess(serviceId, dbId, {persist: false})
+    if (serviceKey !== 'system' && !dbRecord?.value?.services?.find(a => a.serviceKey === serviceKey)) {
+      await privateServerDb.configureServiceDbAccess(serviceKey, dbId, {persist: false})
     }
     return db
   } catch (e) {
@@ -98,19 +98,19 @@ export async function loadDb (serviceId: string, dbId: string): Promise<PrivateS
 }
 
 // Resolves an app's db alias to its dbId
-export async function resolveAlias (serviceId: string, alias: string): Promise<string|undefined> {
+export async function resolveAlias (serviceKey: string, alias: string): Promise<string|undefined> {
   if (!privateServerDb || !privateServerDb.databases) {
     throw new Error('Cannot resolve alias: server db not available')
   }
   if (HYPER_KEY.test(alias)) return alias
   const dbRecords = await privateServerDb.databases.list<DatabaseRecordValue>()
-  const dbRecord = dbRecords.find(r => r.value?.services?.find(a => a.serviceId === serviceId && a.alias === alias))
+  const dbRecord = dbRecords.find(r => r.value?.services?.find(a => a.serviceKey === serviceKey && a.alias === alias))
   if (dbRecord?.value) {
     return dbRecord.value.dbId
   }
 }
 
-export async function createDb (serviceId: string, opts: DbSettings): Promise<GeneralDB> {
+export async function createDb (serviceKey: string, opts: DbSettings): Promise<GeneralDB> {
   if (!privateServerDb) {
     throw new Error('Cannot create new db: server db not available')
   }
@@ -130,12 +130,12 @@ export async function createDb (serviceId: string, opts: DbSettings): Promise<Ge
       if (!dbRecord.value) return false
       dbRecord.value.network = {access: netAccess}
       dbRecord.value.services = [{
-        serviceId,
+        serviceKey,
         alias: opts.alias,
         persist: defined(opts.persist) ? opts.persist : true,
         presync: defined(opts.presync) ? opts.presync : false
       }]
-      dbRecord.value.createdBy = {serviceId}
+      dbRecord.value.createdBy = {serviceKey}
       dbRecord.value.createdAt = (new Date()).toISOString()
       return true
     })
@@ -144,16 +144,16 @@ export async function createDb (serviceId: string, opts: DbSettings): Promise<Ge
 }
 
 // Get a database by an application's alias ID. If a db does not exist at that alias, this function will create one.
-export async function getOrCreateDbByAlias (serviceId: string, alias: string, settings: DbSettings): Promise<PrivateServerDB|GeneralDB> {
+export async function getOrCreateDbByAlias (serviceKey: string, alias: string, settings: DbSettings): Promise<PrivateServerDB|GeneralDB> {
   const release = await lock(`get-or-create-db:${alias}`)
   try {
-    const dbId = await resolveAlias(serviceId, alias)
+    const dbId = await resolveAlias(serviceKey, alias)
     if (dbId) {
-      const db = await loadDb(serviceId, dbId)
+      const db = await loadDb(serviceKey, dbId)
       if (!db) throw new Error(`Failed to load database: ${alias} (${dbId})`)
       return db
     } else {
-      return createDb(serviceId, Object.assign({}, settings, {alias}))
+      return createDb(serviceKey, Object.assign({}, settings, {alias}))
     }
   } finally {
     release()
@@ -161,43 +161,43 @@ export async function getOrCreateDbByAlias (serviceId: string, alias: string, se
 }
 
 // List databases attached to an application.
-export function listServiceDbs (serviceId: string): Promise<ServiceDbConfig[]> {
+export function listServiceDbs (serviceKey: string): Promise<ServiceDbConfig[]> {
   if (!privateServerDb) {
     throw new Error('Cannot list app db records: server db not available')
   }
-  return privateServerDb.listServiceDbs(serviceId)
+  return privateServerDb.listServiceDbs(serviceKey)
 }
 
 // Update the configuration of a database's attachment to an application.
-export async function configureServiceDbAccess (serviceId: string, dbId: string, settings: DbSettings): Promise<DbRecord<DatabaseRecordValue>> {
+export async function configureServiceDbAccess (serviceKey: string, dbId: string, settings: DbSettings): Promise<DbRecord<DatabaseRecordValue>> {
   if (!privateServerDb) {
     throw new Error('Cannot configure app db access: server db not available')
   }
   if (!HYPER_KEY.test(dbId)) {
-    const resolvedDbId = await resolveAlias(serviceId, dbId)
+    const resolvedDbId = await resolveAlias(serviceKey, dbId)
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  const res = await privateServerDb.configureServiceDbAccess(serviceId, dbId, settings)
+  const res = await privateServerDb.configureServiceDbAccess(serviceKey, dbId, settings)
 
   if (defined(settings.displayName)) {
-    const db = await loadDb(serviceId, dbId)
+    const db = await loadDb(serviceKey, dbId)
     await db.updateDesc({displayName: settings.displayName})
   }
 
   return res
 }
 
-export async function getServiceDbConfig (serviceId: string, dbId: string): Promise<ServiceDbConfig> {
+export async function getServiceDbConfig (serviceKey: string, dbId: string): Promise<ServiceDbConfig> {
   if (!privateServerDb) {
     throw new Error('Cannot get app db access: server db not available')
   }
   if (!HYPER_KEY.test(dbId)) {
-    const resolvedDbId = await resolveAlias(serviceId, dbId)
+    const resolvedDbId = await resolveAlias(serviceKey, dbId)
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  return privateServerDb.getServiceDb(serviceId, dbId)
+  return privateServerDb.getServiceDb(serviceKey, dbId)
 }
 
 // Waits for all databases to finish their sync events.

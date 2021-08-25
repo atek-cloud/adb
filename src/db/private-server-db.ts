@@ -44,11 +44,11 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Get database config attached to an application.
-  async getServiceDb (serviceId: string, dbId: string): Promise<ServiceDbConfig> {
+  async getServiceDb (serviceKey: string, dbId: string): Promise<ServiceDbConfig> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
     const dbRecord = await this.databases.get<DatabaseRecordValue>(dbId)
     if (dbRecord?.value) {
-      const access = dbRecord.value.services?.find(a => a.serviceId === serviceId)
+      const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
       if (access) {
         return {
           dbId: dbRecord.value.dbId,
@@ -64,13 +64,13 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // List databases attached to an application.
-  async listServiceDbs (serviceId: string): Promise<ServiceDbConfig[]> {
+  async listServiceDbs (serviceKey: string): Promise<ServiceDbConfig[]> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
     const databases: ServiceDbConfig[] = []
     const dbRecords = await this.databases.list<DatabaseRecordValue>()
     for (const dbRecord of dbRecords) {
       if (!dbRecord.value) continue
-      const access = dbRecord.value.services?.find(a => a.serviceId === serviceId)
+      const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
       if (access) {
         databases.push({
           dbId: dbRecord.value.dbId,
@@ -106,7 +106,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
               writable: db.writable
             },
             services: [],
-            createdBy: {serviceId: '', accountId: ''},
+            createdBy: {serviceKey: '', accountId: ''},
             createdAt: (new Date()).toISOString()
           }
         }
@@ -142,14 +142,14 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update the configuration of a database's attachment to an application.
-  configureServiceDbAccess (serviceId: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<DatabaseRecordValue>> {
+  configureServiceDbAccess (serviceKey: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<DatabaseRecordValue>> {
     return this.updateDbRecord(dbId, dbRecord => {
       if (!dbRecord.value) return false
       if (!dbRecord.value.services) dbRecord.value.services = []
-      let access = dbRecord.value.services.find(a => a.serviceId === serviceId)
+      let access = dbRecord.value.services.find(a => a.serviceKey === serviceKey)
       if (!access) {
         access = {
-          serviceId,
+          serviceKey,
           persist: false,
           presync: false
         }
