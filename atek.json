@@ -1,5 +1,4 @@
 {
-  "runtime": "node",
   "exports": [
     {"api": "atek.cloud/adb-api", "path": "/_api/adb"},
     {"api": "atek.cloud/adb-ctrl-api", "path": "/_api/adb-ctrl"}
