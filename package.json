@@ -23,10 +23,12 @@
   "author": "Paul Frazee <pfrazee@gmail.com>",
   "license": "MIT",
   "repository": "github:atek-cloud/adb",
-  "bugs": {"url": "https://github.com/atek-cloud/adb/issues"},
+  "bugs": {
+    "url": "https://github.com/atek-cloud/adb/issues"
+  },
   "homepage": "https://github.com/atek-cloud/adb#readme",
   "dependencies": {
-    "@atek-cloud/node-rpc": "^2.0.2",
+    "@atek-cloud/node-rpc": "^3.0.0",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",
     "body-parser": "^1.19.0",
