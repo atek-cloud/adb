@@ -13,8 +13,7 @@ import through2 from 'through2'
 import bytes from 'bytes'
 import lock from '../lib/lock.js'
 import { constructEntryUrl } from '../lib/strings.js'
-import { TableSettings } from '../gen/atek.cloud/adb-api.js'
-import { NetworkSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
+import { TableSettings, NetworkSettings } from '@atek-cloud/adb-api'
 
 const READ_TIMEOUT = 10e3
 const BACKGROUND_INDEXING_DELAY = 5e3 // how much time is allowed to pass before globally indexing an update

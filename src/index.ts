@@ -2,12 +2,9 @@ import createExpressApp, * as express from 'express'
 import bodyParser from 'body-parser'
 import * as dbs from './db/index.js'
 import { joinPath } from './lib/strings.js'
-import { DbDescription, Record, BlobMap, BlobDesc, Diff, ListOpts, TableSettings, TableDescription } from './gen/atek.cloud/adb-api.js'
-import AdbApiServer from './gen/atek.cloud/adb-api.server.js'
-import { AdbProcessConfig, DbSettings, DbInfo } from './gen/atek.cloud/adb-ctrl-api.js'
-import AdbCtrlApiServer from './gen/atek.cloud/adb-ctrl-api.server.js'
+import { createServer as createAdbServer, AdbProcessConfig, DbSettings, DbInfo, DbDescription, Record, BlobMap, BlobDesc, Diff, ListOpts, TableSettings, TableDescription } from '@atek-cloud/adb-api'
 
-const adbCtrlApiServer = new AdbCtrlApiServer({
+const adbApiServer = createAdbServer({
   // Initialize the ADB process
   init (config: AdbProcessConfig): Promise<void> {
     return dbs.setup(config)
@@ -21,38 +18,36 @@ const adbCtrlApiServer = new AdbCtrlApiServer({
   },
 
   // Create a new database
-  async createDb (settings: DbSettings): Promise<DbInfo> {
+  async dbCreate (settings: DbSettings): Promise<DbInfo> {
     const db = await dbs.createDb('system', settings)
     if (!db?.dbId) throw new Error('Failed to create database')
     return {dbId: db.dbId}
   },
 
   // Get or create a database according to an alias. Database aliases are local to each application.
-  async getOrCreateDb (alias: string, settings: DbSettings): Promise<DbInfo> {
+  async dbGetOrCreate (alias: string, settings: DbSettings): Promise<DbInfo> {
     const db = await dbs.getOrCreateDbByAlias('system', alias, settings)
     if (!db?.dbId) throw new Error('Failed to get or create database')
     return {dbId: db.dbId}
   },
 
   // Configure a database's settings
-  async configureDb (dbId: string, settings: DbSettings): Promise<void> {
+  async dbConfigure (dbId: string, settings: DbSettings): Promise<void> {
     await dbs.configureServiceDbAccess('system', dbId, settings)
   },
 
   // Configure a database's settings
-  getDbConfig (dbId: string): Promise<DbSettings> {
+  dbGetConfig (dbId: string): Promise<DbSettings> {
     return dbs.getServiceDbConfig('system', dbId)
   },
 
   // Configure a database's settings
-  listDbs (): Promise<DbSettings[]> {
+  dbList (): Promise<DbSettings[]> {
     return dbs.listServiceDbs('service')
-  }
-})
-
-const adbApiServer = new AdbApiServer({
+  },
+  
   // Get metadata and information about a database.
-  async describe (dbId: string): Promise<DbDescription> {
+  async dbDescribe (dbId: string): Promise<DbDescription> {
     const db = await dbs.loadDb('system', dbId)
     return {
       dbId,
@@ -68,7 +63,7 @@ const adbApiServer = new AdbApiServer({
   },
 
   // Register a table's schema and metadata. 
-  async table (dbId: string, tableId: string, desc: TableSettings): Promise<TableDescription> {
+  async tblDefine (dbId: string, tableId: string, desc: TableSettings): Promise<TableDescription> {
     const db = await dbs.loadDb('system', dbId)
     const schema = db.table(tableId, desc).schema
     return {
@@ -80,7 +75,7 @@ const adbApiServer = new AdbApiServer({
   },
 
   // List records in a table.
-  async list (dbId: string, tableId: string, opts?: ListOpts): Promise<{records: Record[]}> {
+  async tblList (dbId: string, tableId: string, opts?: ListOpts): Promise<{records: Record[]}> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     const records = await table.list<object>(opts)
@@ -96,7 +91,7 @@ const adbApiServer = new AdbApiServer({
   },
 
   // Get a record in a table.
-  async get (dbId: string, tableId: string, key: string): Promise<Record> {
+  async tblGet (dbId: string, tableId: string, key: string): Promise<Record> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     const record = await table.get<object>(key)
@@ -111,7 +106,7 @@ const adbApiServer = new AdbApiServer({
   },
 
   // Add a record to a table.
-  async create (dbId: string, tableId: string, value: object, blobs?: BlobMap): Promise<Record> {
+  async tblCreate (dbId: string, tableId: string, value: object, blobs?: BlobMap): Promise<Record> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     
@@ -143,7 +138,7 @@ const adbApiServer = new AdbApiServer({
   },
 
   // Write a record to a table.
-  async put (dbId: string, tableId: string, key: string, value: object): Promise<Record> {
+  async tblPut (dbId: string, tableId: string, key: string, value: object): Promise<Record> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     await table.put(key, value)
@@ -157,20 +152,20 @@ const adbApiServer = new AdbApiServer({
   },
   
   // Delete a record from a table.
-  async delete (dbId: string, tableId: string, key: string): Promise<void> {
+  async tblDelete (dbId: string, tableId: string, key: string): Promise<void> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     await table.del(key)
   },
   
   // Enumerate the differences between two versions of the database.
-  async diff (dbId: string, opts: {left: number, right?: number, tableIds?: string[]}): Promise<Diff[]> {
+  async tblDiff (dbId: string, opts: {left: number, right?: number, tableIds?: string[]}): Promise<Diff[]> {
     // TODO
     throw "TODO"
   },
 
   // Get a blob of a record.
-  async getBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<Buffer> {
+  async tblGetBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<Buffer> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     const {buf} = await table.getBlob(key, blobName, 'binary')
@@ -178,14 +173,14 @@ const adbApiServer = new AdbApiServer({
   },
   
   // Write a blob of a record.
-  async putBlob (dbId: string, tableId: string, key: string, blobName: string, blobValue: BlobDesc): Promise<void> {
+  async tblPutBlob (dbId: string, tableId: string, key: string, blobName: string, blobValue: BlobDesc): Promise<void> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     await table.putBlob(key, blobName, blobValue.buf, {mimeType: blobValue.mimeType})
   },
   
   // Delete a blob of a record.
-  async delBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<void> {
+  async tblDelBlob (dbId: string, tableId: string, key: string, blobName: string): Promise<void> {
     const db = await dbs.loadDb('system', dbId)
     const table = db.table(tableId)
     await table.delBlob(key, blobName)
@@ -195,7 +190,6 @@ const adbApiServer = new AdbApiServer({
 const PORT = Number(process.env.ATEK_ASSIGNED_PORT)
 const app = createExpressApp()
 app.use(bodyParser.json())
-app.post('/_api/adb-ctrl', (req, res) => adbCtrlApiServer.handle(req, res, req.body))
 app.post('/_api/adb', (req, res) => adbApiServer.handle(req, res, req.body))
 app.get('/', (req: express.Request, res: express.Response) => {
   res.status(200).end('ADB server active')

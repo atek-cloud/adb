@@ -28,7 +28,9 @@
   },
   "homepage": "https://github.com/atek-cloud/adb#readme",
   "dependencies": {
-    "@atek-cloud/node-rpc": "^3.0.0",
+    "@atek-cloud/adb-api": "^1.0.0",
+    "@atek-cloud/adb-tables": "^1.0.1",
+    "@atek-cloud/node-rpc": "^4.0.1",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",
     "body-parser": "^1.19.0",
@@ -45,7 +47,7 @@
     "through2": "^4.0.2"
   },
   "devDependencies": {
-    "@atek-cloud/atek": "^0.0.7",
+    "@atek-cloud/atek": "^0.0.9",
     "@types/bytes": "^3.1.1",
     "@types/express": "^4.17.13",
     "@types/lodash.debounce": "^4.0.6",

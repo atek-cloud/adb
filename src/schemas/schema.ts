@@ -1,5 +1,5 @@
 import createMlts from 'monotonic-lexicographic-timestamp'
-import { TableDescription, TableSettings, TableTemplates } from '../gen/atek.cloud/adb-api.js'
+import { TableDescription, TableSettings, TableTemplates } from '@atek-cloud/adb-api'
 // import { ValidationError } from '../lib/errors.js'
 import { createTemplateFn, TemplateFunction, createValidator, Validator } from './util.js'
 

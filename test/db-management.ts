@@ -2,16 +2,10 @@ import test from 'ava'
 import * as atek from '@atek-cloud/atek'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
-
-import AdbCtrlApiClient from '../src/gen/atek.cloud/adb-ctrl-api.js'
-import AdbApiClient from '../src/gen/atek.cloud/adb-api.js'
+import adb, { defineTable } from '@atek-cloud/adb-api'
+adb.api.$setEndpoint({port: 10000})
 
 const HERE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
-
-const adbCtrl = new AdbCtrlApiClient()
-adbCtrl.$setEndpoint({port: 10000})
-const adb = new AdbApiClient()
-adb.$setEndpoint({port: 10000})
 
 let inst: any
 let activeCfg: any
@@ -36,54 +30,58 @@ test.serial('Load test atek instance', async t => {
 })
 
 test('Describe the server db', async t => {
-  const desc = await adb.describe(activeCfg.serverDbId)
+  const desc = await adb.db(activeCfg.serverDbId).describe()
   t.truthy(desc, 'Returns a description object')
   t.is(desc.dbId, activeCfg.serverDbId, 'Gave the correct database\'s description')
   t.truthy(desc.tables.find((table: any) => table.tableId === 'atek.cloud/database'), 'Registered atek.cloud/database')
 })
 
 test('Create a new db', async t => {
-  const dbInfo = await adbCtrl.createDb({displayName: 'Test DB 1'})
-  t.truthy(dbInfo.dbId, 'DB successfully created')
+  const db = await adb.db({displayName: 'Test DB 1'})
+  await db.isReady
+  t.truthy(db.dbId, 'DB successfully created')
 
-  const desc = await adb.describe(dbInfo.dbId)
-  t.is(dbInfo.dbId, desc.dbId, 'Describe() for correct database')
+  const desc = await db.describe()
+  t.is(db.dbId, desc.dbId, 'Describe() for correct database')
   t.is(desc.displayName, 'Test DB 1')
 })
 
 test('Get and create a db by alias', async t => {
-  const dbInfo = await adbCtrl.getOrCreateDb('dbalias', {displayName: 'Test DB 2'})
-  t.truthy(dbInfo.dbId, 'DB successfully created')
+  const db = adb.db('dbalias', {displayName: 'Test DB 2'})
+  await db.isReady
+  t.truthy(db.dbId, 'DB successfully created')
 
-  const desc = await adb.describe(dbInfo.dbId)
-  t.is(dbInfo.dbId, desc.dbId, 'Describe() for correct database')
+  const desc = await db.describe()
+  t.is(db.dbId, desc.dbId, 'Describe() for correct database')
   t.is(desc.displayName, 'Test DB 2', 'Display name is correct')
 
-  const dbInfo2 = await adbCtrl.getOrCreateDb('dbalias', {displayName: 'Test DB 2'})
-  t.is(dbInfo.dbId, dbInfo2.dbId, 'DB successfully gotten')
+  const db2 = adb.db('dbalias', {displayName: 'Test DB 2'})
+  await db2.isReady
+  t.is(db.dbId, db2.dbId, 'DB successfully gotten')
 })
 
 test('Get and set db config', async t => {
-  const dbInfo = await adbCtrl.getOrCreateDb('dbalias2', {
+  const db = adb.db('dbalias2', {
     displayName: 'Test DB 3',
     persist: true,
     presync: true
   })
-  t.truthy(dbInfo.dbId, 'DB successfully created')
+  await db.isReady
+  t.truthy(db.dbId, 'DB successfully created')
 
-  const cfg = await adbCtrl.getDbConfig('dbalias2')
+  const cfg = await adb.api.dbGetConfig('dbalias2')
   t.is(cfg.displayName, 'Test DB 3', 'Display name is correct')
   t.is(cfg.alias, 'dbalias2', 'Alias is correct')
   t.is(cfg.persist, true, 'Persist is correct')
   t.is(cfg.presync, true, 'Presync is correct')
 
-  await adbCtrl.configureDb('dbalias2', {
+  await adb.api.dbConfigure('dbalias2', {
     displayName: 'Test DB 3 - Modified',
     persist: false,
     presync: false
   })
 
-  const cfg2 = await adbCtrl.getDbConfig('dbalias2')
+  const cfg2 = await adb.api.dbGetConfig('dbalias2')
   t.is(cfg2.displayName, 'Test DB 3 - Modified', 'Display name is correct')
   t.is(cfg2.alias, 'dbalias2', 'Alias is correct')
   t.is(cfg2.persist, false, 'Persist is correct')

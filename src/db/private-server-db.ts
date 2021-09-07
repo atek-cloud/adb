@@ -3,8 +3,8 @@ import { loadDb, GeneralDB } from './index.js'
 import { normalizeDbId } from '../lib/strings.js'
 import { defined } from '../lib/functions.js'
 
-import DatabaseRecordValue, * as DatabaseRecords from '../gen/atek.cloud/database.js'
-import { DbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
+import { Database, DATABASE } from '@atek-cloud/adb-tables'
+import { DbSettings } from '@atek-cloud/adb-api'
 
 export interface ServiceDbConfig {
   dbId: string // The database identifier.
@@ -31,10 +31,10 @@ export class PrivateServerDB extends BaseHyperbeeDB {
 
   async setup (opts: SetupOpts) {
     await super.setup(opts)
-    this.databases = this.table(DatabaseRecords.ID, {
-      revision: DatabaseRecords.REVISION,
-      templates: DatabaseRecords.TEMPLATES,
-      definition: DatabaseRecords.JSON_SCHEMA
+    this.databases = this.table(DATABASE.ID, {
+      revision: DATABASE.REVISION,
+      templates: DATABASE.TEMPLATES,
+      definition: DATABASE.DEFINITION
     })
   }
   
@@ -46,7 +46,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   // Get database config attached to an application.
   async getServiceDb (serviceKey: string, dbId: string): Promise<ServiceDbConfig> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
-    const dbRecord = await this.databases.get<DatabaseRecordValue>(dbId)
+    const dbRecord = await this.databases.get<Database>(dbId)
     if (dbRecord?.value) {
       const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
       if (access) {
@@ -67,7 +67,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   async listServiceDbs (serviceKey: string): Promise<ServiceDbConfig[]> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
     const databases: ServiceDbConfig[] = []
-    const dbRecords = await this.databases.list<DatabaseRecordValue>()
+    const dbRecords = await this.databases.list<Database>()
     for (const dbRecord of dbRecords) {
       if (!dbRecord.value) continue
       const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
@@ -86,13 +86,13 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update a database's record.
-  async updateDbRecord (dbId: string, updateFn: (record: DbRecord<DatabaseRecordValue>) => boolean): Promise<DbRecord<DatabaseRecordValue>> {
+  async updateDbRecord (dbId: string, updateFn: (record: DbRecord<Database>) => boolean): Promise<DbRecord<Database>> {
     if (!this.databases) throw new Error('Cannot update db record: this database is not setup')
     dbId = normalizeDbId(dbId)
     const release = await this.databases.lock(dbId)
     try {
       let isNew = false
-      let dbRecord = await this.databases.get<DatabaseRecordValue>(dbId)
+      let dbRecord = await this.databases.get<Database>(dbId)
       if (!dbRecord) {
         const db = await loadDb('system', dbId)
         if (!db) throw new Error(`Failed to load database: ${dbId}`)
@@ -122,7 +122,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update a database record's cached metadata.
-  updateDbRecordCachedMeta (db: PrivateServerDB|GeneralDB|BaseHyperbeeDB): Promise<DbRecord<DatabaseRecordValue>> {
+  updateDbRecordCachedMeta (db: PrivateServerDB|GeneralDB|BaseHyperbeeDB): Promise<DbRecord<Database>> {
     if (!db.dbId) throw new Error('Cannot update record cached meta: database not hydrated')
     return this.updateDbRecord(db.dbId, dbRecord => {
       if (!dbRecord.value) return false
@@ -142,7 +142,7 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update the configuration of a database's attachment to an application.
-  configureServiceDbAccess (serviceKey: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<DatabaseRecordValue>> {
+  configureServiceDbAccess (serviceKey: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<Database>> {
     return this.updateDbRecord(dbId, dbRecord => {
       if (!dbRecord.value) return false
       if (!dbRecord.value.services) dbRecord.value.services = []

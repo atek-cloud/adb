@@ -6,8 +6,8 @@ import { CaseInsensitiveMap } from '../lib/map.js'
 import lock from '../lib/lock.js'
 import { defined } from '../lib/functions.js'
 
-import { AdbProcessConfig, DbSettings } from '../gen/atek.cloud/adb-ctrl-api.js'
-import DatabaseRecordValue, { NetworkAccess } from '../gen/atek.cloud/database.js'
+import { AdbProcessConfig, DbSettings } from '@atek-cloud/adb-api'
+import { Database, DatabaseNetworkAccess } from '@atek-cloud/adb-tables'
 
 const SWEEP_INACTIVE_DBS_INTERVAL = 10e3
 
@@ -74,7 +74,7 @@ export async function loadDb (serviceKey: string, dbId: string): Promise<Private
   dbId = normalizeDbId(dbId)
   const release = await lock(`load-db:${dbId}`)
   try {
-    const dbRecord = (await privateServerDb.databases.get<DatabaseRecordValue>(dbId))
+    const dbRecord = (await privateServerDb.databases.get<Database>(dbId))
     let db = getDb(dbId)
     if (!db) {
       db = new GeneralDB({
@@ -103,7 +103,7 @@ export async function resolveAlias (serviceKey: string, alias: string): Promise<
     throw new Error('Cannot resolve alias: server db not available')
   }
   if (HYPER_KEY.test(alias)) return alias
-  const dbRecords = await privateServerDb.databases.list<DatabaseRecordValue>()
+  const dbRecords = await privateServerDb.databases.list<Database>()
   const dbRecord = dbRecords.find(r => r.value?.services?.find(a => a.serviceKey === serviceKey && a.alias === alias))
   if (dbRecord?.value) {
     return dbRecord.value.dbId
@@ -114,7 +114,7 @@ export async function createDb (serviceKey: string, opts: DbSettings): Promise<G
   if (!privateServerDb) {
     throw new Error('Cannot create new db: server db not available')
   }
-  const netAccess = (opts.network?.access || 'public') as NetworkAccess
+  const netAccess = (opts.network?.access || 'public') as DatabaseNetworkAccess
   const db = new GeneralDB({network: {access: netAccess}})
   await db.setup({
     create: true,
@@ -169,7 +169,7 @@ export function listServiceDbs (serviceKey: string): Promise<ServiceDbConfig[]> 
 }
 
 // Update the configuration of a database's attachment to an application.
-export async function configureServiceDbAccess (serviceKey: string, dbId: string, settings: DbSettings): Promise<DbRecord<DatabaseRecordValue>> {
+export async function configureServiceDbAccess (serviceKey: string, dbId: string, settings: DbSettings): Promise<DbRecord<Database>> {
   if (!privateServerDb) {
     throw new Error('Cannot configure app db access: server db not available')
   }
