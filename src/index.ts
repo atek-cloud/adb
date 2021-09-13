@@ -187,13 +187,13 @@ const adbApiServer = createAdbServer({
   }
 })
 
-const PORT = Number(process.env.ATEK_ASSIGNED_PORT)
+const SOCKETFILE = process.env.ATEK_ASSIGNED_SOCKET_FILE
 const app = createExpressApp()
 app.use(bodyParser.json())
 app.post('/_api/adb', (req, res) => adbApiServer.handle(req, res, req.body))
 app.get('/', (req: express.Request, res: express.Response) => {
   res.status(200).end('ADB server active')
 })
-app.listen(PORT, () => {
-  console.log(`ADB server running at: http://localhost:${PORT}/`)
+app.listen(SOCKETFILE, () => {
+  console.log(`ADB server running at: ${SOCKETFILE}`)
 })
