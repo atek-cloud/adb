@@ -30,7 +30,7 @@
   "dependencies": {
     "@atek-cloud/adb-api": "^1.0.0",
     "@atek-cloud/adb-tables": "^1.0.1",
-    "@atek-cloud/node-rpc": "^4.0.1",
+    "@atek-cloud/node-rpc": "^4.2.0",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",
     "body-parser": "^1.19.0",
