@@ -28,8 +28,8 @@
   },
   "homepage": "https://github.com/atek-cloud/adb#readme",
   "dependencies": {
-    "@atek-cloud/adb-api": "^1.0.0",
-    "@atek-cloud/adb-tables": "^1.0.1",
+    "@atek-cloud/adb-api": "^1.1.0",
+    "@atek-cloud/adb-tables": "^1.3.0",
     "@atek-cloud/node-rpc": "^4.2.0",
     "ajv": "^8.6.2",
     "ajv-formats": "^2.1.1",

@@ -32,7 +32,9 @@ export function normalizeDbId (dbId: string): string {
   if (dbId.startsWith('hyper://')) {
     dbId = hyperUrlToKeyStr(dbId) || dbId
   }
-  if (!HYPER_KEY.test(dbId)) throw new InvalidIdError(`Invalid database ID: ${dbId}`)
+  if (!HYPER_KEY.test(dbId)) {
+    throw new InvalidIdError(`Invalid database ID: ${dbId}`)
+  }
   return dbId
 }
 

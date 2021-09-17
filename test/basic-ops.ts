@@ -7,8 +7,8 @@ adb.api.$setEndpoint({port: 10000})
 
 const HERE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
 
-export const TEST_RECORD_ID = 'example.com/test'
-export const TEST_RECORD_DEFINITION = {
+const TEST_RECORD_ID = 'example.com/test'
+const TEST_RECORD_DEFINITION = {
   "$schema":"http://json-schema.org/draft-07/schema#",
   "type":"object",
   "properties":{
@@ -18,9 +18,9 @@ export const TEST_RECORD_DEFINITION = {
   },
   "required":["id","createdAt"]
 }
-export const TEST_RECORD_TEMPLATES = {"table":{"title":"Test Records","description":"An example table."},"record":{"key":"{{/id}}","title":"Test record ID: {{/id}}"}};
+const TEST_RECORD_TEMPLATES = {"table":{"title":"Test Records","description":"An example table."},"record":{"key":"{{/id}}","title":"Test record ID: {{/id}}"}};
 
-export default interface TestRecord {
+interface TestRecord {
   id: string
   obj: {
     bool: boolean
@@ -50,8 +50,9 @@ test.serial('Load test atek instance', async t => {
     ]
   })
   inst = await atek.test.startAtek(cfg)
+  adb.api.$setAuthHeader(`Bearer ${inst.authToken}`)
 
-  activeCfg = await inst.api('atek.cloud/inspect-api')('getConfig')
+  activeCfg = await inst.api('atek.cloud/inspect-api').call('getConfig')
   t.truthy(activeCfg.serverDbId, 'Server DB ID was created')
 })
 

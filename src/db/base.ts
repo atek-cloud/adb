@@ -32,6 +32,11 @@ interface BeeInfo {
   discoveryKey?: Buffer
 }
 
+export interface Auth {
+  userKey: string
+  serviceKey: string
+}
+
 export interface BaseHyperbeeDBOpts {
   key?: string | Buffer
   network?: NetworkSettings

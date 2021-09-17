@@ -1,9 +1,9 @@
-import { BaseHyperbeeDB, SetupOpts, DbRecord, Table } from './base.js'
+import { BaseHyperbeeDB, SetupOpts, DbRecord, Table, Auth } from './base.js'
 import { loadDb, GeneralDB } from './index.js'
 import { normalizeDbId } from '../lib/strings.js'
 import { defined } from '../lib/functions.js'
 
-import { Database, DATABASE } from '@atek-cloud/adb-tables'
+import { Database, DATABASE, User, USER } from '@atek-cloud/adb-tables'
 import { DbSettings } from '@atek-cloud/adb-api'
 
 export interface ServiceDbConfig {
@@ -17,6 +17,7 @@ export interface ServiceDbConfig {
 
 export class PrivateServerDB extends BaseHyperbeeDB {
   databases: Table | undefined
+  users: Table | undefined
 
   constructor ({key}: {key: string|undefined}) {
     super({
@@ -36,6 +37,11 @@ export class PrivateServerDB extends BaseHyperbeeDB {
       templates: DATABASE.TEMPLATES,
       definition: DATABASE.DEFINITION
     })
+    this.users = this.table(USER.ID, {
+      revision: USER.REVISION,
+      templates: USER.TEMPLATES,
+      definition: USER.DEFINITION
+    })
   }
   
   async onDatabaseCreated () {
@@ -43,12 +49,22 @@ export class PrivateServerDB extends BaseHyperbeeDB {
     await this.updateDesc({displayName: 'Server Registry'})
   }
 
+  async getUser (userKey: string): Promise<DbRecord<User>|undefined> {
+    return await this.users?.get(userKey)
+  }
+
+  async isUserAdmin (userKey: string): Promise<boolean> {
+    if (userKey === 'system') return true
+    const user = await this.getUser(userKey)
+    return user?.value.role === 'admin'
+  }
+
   // Get database config attached to an application.
-  async getServiceDb (serviceKey: string, dbId: string): Promise<ServiceDbConfig> {
+  async getServiceDb (auth: Auth, dbId: string): Promise<ServiceDbConfig> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
     const dbRecord = await this.databases.get<Database>(dbId)
     if (dbRecord?.value) {
-      const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
+      const access = dbRecord.value.services?.find(a => a.serviceKey === auth.serviceKey)
       if (access) {
         return {
           dbId: dbRecord.value.dbId,
@@ -64,13 +80,13 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // List databases attached to an application.
-  async listServiceDbs (serviceKey: string): Promise<ServiceDbConfig[]> {
+  async listServiceDbs (auth: Auth): Promise<ServiceDbConfig[]> {
     if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
     const databases: ServiceDbConfig[] = []
     const dbRecords = await this.databases.list<Database>()
     for (const dbRecord of dbRecords) {
       if (!dbRecord.value) continue
-      const access = dbRecord.value.services?.find(a => a.serviceKey === serviceKey)
+      const access = dbRecord.value.services?.find(a => a.serviceKey === auth.serviceKey)
       if (access) {
         databases.push({
           dbId: dbRecord.value.dbId,
@@ -79,6 +95,42 @@ export class PrivateServerDB extends BaseHyperbeeDB {
           alias: access.alias,
           persist: access.persist || false,
           presync: access.presync || false
+        })
+      }
+    }
+    return databases
+  }
+
+  // List databases owned by a user
+  async listUserDbs (auth: Auth, owningUserKey: string): Promise<ServiceDbConfig[]> {
+    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
+    const isAdmin = await this.isUserAdmin(auth.userKey)
+    if (auth.userKey !== owningUserKey && !isAdmin) {
+      throw new Error('Not authorized')
+    }
+    const databases: ServiceDbConfig[] = []
+    if (owningUserKey === 'system') {
+      // add the server db
+      databases.push({
+        dbId: this.dbId || '',
+        displayName: this.displayName,
+        writable: this.writable,
+        alias: '',
+        persist: true,
+        presync: false
+      })
+    }
+    const dbRecords = await this.databases.list<Database>()
+    for (const dbRecord of dbRecords) {
+      if (!dbRecord.value) continue
+      if (dbRecord.value.owningUserKey === owningUserKey) {
+        databases.push({
+          dbId: dbRecord.value.dbId,
+          displayName: dbRecord.value.cachedMeta?.displayName,
+          writable: dbRecord.value.cachedMeta?.writable,
+          alias: '',
+          persist: dbRecord.value.services?.reduce<boolean>((acc, s) => s.persist || acc, false) || false,
+          presync: dbRecord.value.services?.reduce<boolean>((acc, s) => s.presync || acc, false) || false
         })
       }
     }
@@ -94,19 +146,20 @@ export class PrivateServerDB extends BaseHyperbeeDB {
       let isNew = false
       let dbRecord = await this.databases.get<Database>(dbId)
       if (!dbRecord) {
-        const db = await loadDb('system', dbId)
+        const db = await loadDb({serviceKey: 'system', userKey: 'system'}, dbId)
         if (!db) throw new Error(`Failed to load database: ${dbId}`)
         isNew = true
         dbRecord = {
           key: dbId,
           value: {
             dbId,
+            owningUserKey: '',
             cachedMeta: {
               displayName: db.displayName,
               writable: db.writable
             },
             services: [],
-            createdBy: {serviceKey: '', accountId: ''},
+            createdBy: {serviceKey: ''},
             createdAt: (new Date()).toISOString()
           }
         }
@@ -142,14 +195,14 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   }
 
   // Update the configuration of a database's attachment to an application.
-  configureServiceDbAccess (serviceKey: string, dbId: string, config: DbSettings = {}): Promise<DbRecord<Database>> {
+  configureServiceDbAccess (auth: Auth, dbId: string, config: DbSettings = {}): Promise<DbRecord<Database>> {
     return this.updateDbRecord(dbId, dbRecord => {
       if (!dbRecord.value) return false
       if (!dbRecord.value.services) dbRecord.value.services = []
-      let access = dbRecord.value.services.find(a => a.serviceKey === serviceKey)
+      let access = dbRecord.value.services.find(a => a.serviceKey === auth.serviceKey)
       if (!access) {
         access = {
-          serviceKey,
+          serviceKey: auth.serviceKey,
           persist: false,
           presync: false
         }

@@ -24,8 +24,9 @@ test.serial('Load test atek instance', async t => {
     ]
   })
   inst = await atek.test.startAtek(cfg)
+  adb.api.$setAuthHeader(`Bearer ${inst.authToken}`)
 
-  activeCfg = await inst.api('atek.cloud/inspect-api')('getConfig')
+  activeCfg = await inst.api('atek.cloud/inspect-api').call('getConfig')
   t.truthy(activeCfg.serverDbId, 'Server DB ID was created')
 })
 
