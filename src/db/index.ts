@@ -74,6 +74,7 @@ export async function loadDb (auth: Auth, dbId: string): Promise<PrivateServerDB
   dbId = normalizeDbId(dbId)
   const release = await lock(`load-db:${dbId}`)
   try {
+    if (dbId === privateServerDb.dbId) return privateServerDb
     const dbRecord = (await privateServerDb.databases.get<Database>(dbId))
     let db = getDb(dbId)
     if (!db) {
