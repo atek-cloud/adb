@@ -1,28 +1,18 @@
-import { BaseHyperbeeDB, SetupOpts, DbRecord, Table, Auth } from './base.js'
-import { loadDb, GeneralDB } from './index.js'
+import { BaseHyperbeeDB, SetupOpts, DbRecord } from './base.js'
+import { loadDb, getDb, GeneralDB } from './index.js'
+import { Auth } from './permissions.js'
 import { normalizeDbId } from '../lib/strings.js'
 import { defined } from '../lib/functions.js'
+import { DbConfig, DbAdminConfig, DbInfo } from '@atek-cloud/adb-api'
+import { DB_PATH, USER_PATH, SERVICE_PATH, dbValidator, Database, User, Service, DatabaseAccess } from './schemas.js'
 
-import { Database, DATABASE, User, USER } from '@atek-cloud/adb-tables'
-import { DbSettings } from '@atek-cloud/adb-api'
-
-export interface ServiceDbConfig {
-  dbId: string // The database identifier.
-  displayName?: string // The user-friendly name of the database.
-  writable?: boolean // Is the database writable?
-  alias?: string // The alias ID of this database for this application.
-  persist: boolean // Does this application want to keep the database in storage?
-  presync: boolean // Does this application want the database to be fetched optimistically from the network?
-}
+const MY_SKEY = process.env.ATEK_ASSIGNED_SERVICE_KEY
 
 export class PrivateServerDB extends BaseHyperbeeDB {
-  databases: Table | undefined
-  users: Table | undefined
-
   constructor ({key}: {key: string|undefined}) {
     super({
       key,
-      network: {access: 'private'}
+      access: DatabaseAccess.private
     })
   }
 
@@ -32,141 +22,181 @@ export class PrivateServerDB extends BaseHyperbeeDB {
 
   async setup (opts: SetupOpts) {
     await super.setup(opts)
-    this.databases = this.table(DATABASE.ID, {
-      revision: DATABASE.REVISION,
-      templates: DATABASE.TEMPLATES,
-      definition: DATABASE.DEFINITION
-    })
-    this.users = this.table(USER.ID, {
-      revision: USER.REVISION,
-      templates: USER.TEMPLATES,
-      definition: USER.DEFINITION
-    })
   }
   
   async onDatabaseCreated () {
     console.log('New private server database created, key:', this.dbId)
-    await this.updateDesc({displayName: 'Server Registry'})
   }
 
-  async getUser (userKey: string): Promise<DbRecord<User>|undefined> {
-    return await this.users?.get(userKey)
+  getUser (userKey: string): Promise<DbRecord<User>|undefined> {
+    return this.get<User>([...USER_PATH, userKey])
   }
 
   async isUserAdmin (userKey: string): Promise<boolean> {
     if (userKey === 'system') return true
     const user = await this.getUser(userKey)
-    return user?.value.role === 'admin'
+    return user?.value?.role === 'admin'
   }
 
-  // Get database config attached to an application.
-  async getServiceDb (auth: Auth, dbId: string): Promise<ServiceDbConfig> {
-    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
-    const dbRecord = await this.databases.get<Database>(dbId)
+  async getServiceOwnerKey (serviceKey: string): Promise<string|undefined> {
+    if (serviceKey === process.env.ATEK_ASSIGNED_SERVICE_KEY) return 'system'
+    const serviceRecord = await this.get<Service>([...SERVICE_PATH, serviceKey])
+    return serviceRecord?.value?.owningUserKey
+  }
+
+  // Get database config.
+  async getDbConfig (auth: Auth, dbId: string): Promise<DbConfig> {
+    await auth.assertCanReadDatabase(dbId)
+    const dbRecord = await this.get<Database>([...DB_PATH, dbId])
     if (dbRecord?.value) {
-      const access = dbRecord.value.services?.find(a => a.serviceKey === auth.serviceKey)
-      if (access) {
-        return {
-          dbId: dbRecord.value.dbId,
-          displayName: dbRecord.value.cachedMeta?.displayName,
-          writable: dbRecord.value.cachedMeta?.writable,
-          alias: access.alias,
-          persist: access.persist || false,
-          presync: access.presync || false
-        }
+      return {
+        alias: dbRecord.value.alias,
+        access: dbRecord.value.access
       }
     }
     throw new Error('No config for this database found')
   }
 
+  // Get database info.
+  async getDbInfo (auth: Auth, dbId: string): Promise<DbInfo> {
+    await auth.assertCanReadDatabase(dbId)
+    const dbRecord = await this.get<Database>([...DB_PATH, dbId])
+    if (dbRecord?.value) {
+      return {
+        dbId: dbRecord.value.dbId,
+        writable: dbRecord.value.cachedMeta?.writable,
+        isServerDb: dbRecord.value.dbId === this.dbId,
+        owner: dbRecord.value.owner,
+        alias: dbRecord.value.alias,
+        access: dbRecord.value.access,
+        createdAt: dbRecord.value.createdAt
+      }
+    }
+    if (dbId === this.dbId) {
+      return {
+        dbId,
+        writable: true,
+        isServerDb: true,
+        owner: {userKey: 'system', serviceKey: 'system'},
+        access: 'private'
+      }
+    }
+    return {
+      dbId,
+      writable: false,
+      isServerDb: false
+    }
+  }
+
   // List databases attached to an application.
-  async listServiceDbs (auth: Auth): Promise<ServiceDbConfig[]> {
-    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
-    const databases: ServiceDbConfig[] = []
-    const dbRecords = await this.databases.list<Database>()
+  async listServiceDbs (auth: Auth): Promise<DbInfo[]> {
+    const databases: DbInfo[] = []
+    const dbRecords = await this.list<Database>(DB_PATH)
     for (const dbRecord of dbRecords) {
       if (!dbRecord.value) continue
-      const access = dbRecord.value.services?.find(a => a.serviceKey === auth.serviceKey)
-      if (access) {
-        databases.push({
-          dbId: dbRecord.value.dbId,
-          displayName: dbRecord.value.cachedMeta?.displayName,
-          writable: dbRecord.value.cachedMeta?.writable,
-          alias: access.alias,
-          persist: access.persist || false,
-          presync: access.presync || false
-        })
-      }
+      if (dbRecord.value.owner?.serviceKey !== auth.serviceKey) continue
+      databases.push({
+        dbId: dbRecord.value.dbId,
+        writable: dbRecord.value.cachedMeta?.writable,
+        isServerDb: dbRecord.value.dbId === this.dbId,
+        owner: dbRecord.value.owner,
+        alias: dbRecord.value.alias,
+        access: dbRecord.value.access,
+        createdAt: dbRecord.value.createdAt
+      })
     }
     return databases
   }
 
   // List databases owned by a user
-  async listUserDbs (auth: Auth, owningUserKey: string): Promise<ServiceDbConfig[]> {
-    if (!this.databases) throw new Error('Cannot list app db record: this database is not setup')
-    const isAdmin = await this.isUserAdmin(auth.userKey)
-    if (auth.userKey !== owningUserKey && !isAdmin) {
-      throw new Error('Not authorized')
-    }
-    const databases: ServiceDbConfig[] = []
+  async adminListDbsByOwningUser (auth: Auth, owningUserKey: string): Promise<DbInfo[]> {
+    const databases: DbInfo[] = []
     if (owningUserKey === 'system') {
       // add the server db
       databases.push({
         dbId: this.dbId || '',
-        displayName: this.displayName,
         writable: this.writable,
-        alias: '',
-        persist: true,
-        presync: false
+        isServerDb: true,
+        owner: {
+          userKey: 'system',
+          serviceKey: 'system'
+        },
+        access: 'private'
       })
     }
-    const dbRecords = await this.databases.list<Database>()
+    const dbRecords = await this.list<Database>(DB_PATH)
     for (const dbRecord of dbRecords) {
-      if (!dbRecord.value) continue
-      if (dbRecord.value.owningUserKey === owningUserKey) {
+      if (dbRecord.value?.owner?.userKey === owningUserKey) {
         databases.push({
           dbId: dbRecord.value.dbId,
-          displayName: dbRecord.value.cachedMeta?.displayName,
           writable: dbRecord.value.cachedMeta?.writable,
-          alias: '',
-          persist: dbRecord.value.services?.reduce<boolean>((acc, s) => s.persist || acc, false) || false,
-          presync: dbRecord.value.services?.reduce<boolean>((acc, s) => s.presync || acc, false) || false
+          isServerDb: false,
+          owner: dbRecord.value.owner,
+          alias: dbRecord.value.alias,
+          access: dbRecord.value.access,
+          createdAt: dbRecord.value.createdAt
         })
       }
     }
     return databases
   }
 
+  // (admin access) Delete a DB
+  async adminDeleteDb (auth: Auth, dbId: string) {
+    const release = await this.lockPath(DB_PATH)
+    try {
+      const dbRecord = await this.get<Database>([...DB_PATH, dbId])
+      if (!dbRecord?.value) throw new Error('DB not found')
+      await auth.assertCanWriteDatabaseRecord(dbRecord.value, undefined)
+      await this.del([...DB_PATH, dbId])
+
+      const db = getDb(dbId)
+      if (db) {
+        db.onConfigUpdated(dbRecord.value)
+      }
+    } finally {
+      release()
+    }
+  }
+
   // Update a database's record.
-  async updateDbRecord (dbId: string, updateFn: (record: DbRecord<Database>) => boolean): Promise<DbRecord<Database>> {
-    if (!this.databases) throw new Error('Cannot update db record: this database is not setup')
+  async updateDbRecord (auth: Auth, dbId: string, updateFn: (record: DbRecord<Database>) => boolean): Promise<DbRecord<Database>> {
     dbId = normalizeDbId(dbId)
-    const release = await this.databases.lock(dbId)
+    const release = await this.lockPath(DB_PATH)
     try {
       let isNew = false
-      let dbRecord = await this.databases.get<Database>(dbId)
-      if (!dbRecord) {
-        const db = await loadDb({serviceKey: 'system', userKey: 'system'}, dbId)
+      let dbRecord = await this.get<Database>([...DB_PATH, dbId])
+      const oldValue = dbRecord?.value ? JSON.parse(JSON.stringify(dbRecord.value)) : undefined
+      if (!dbRecord?.value) {
+        const db = await loadDb(auth, dbId)
         if (!db) throw new Error(`Failed to load database: ${dbId}`)
         isNew = true
         dbRecord = {
           key: dbId,
           value: {
             dbId,
-            owningUserKey: '',
             cachedMeta: {
-              displayName: db.displayName,
               writable: db.writable
             },
-            services: [],
-            createdBy: {serviceKey: ''},
             createdAt: (new Date()).toISOString()
           }
         }
       }
       const wasChanged = updateFn(dbRecord)
       if (wasChanged !== false || isNew) {
-        await this.databases.put(dbRecord.key, dbRecord.value)
+        await auth.assertCanWriteDatabaseRecord(oldValue, dbRecord.value)
+        if (!dbValidator.validate(dbRecord.value)) {
+          console.error('Warning: a database record failed validation on write')
+          console.error('  Error:', dbValidator.errors()?.[0].propertyName || dbValidator.errors()?.[0].instancePath, dbValidator.errors()?.[0].message)
+          console.error('  Key:', dbRecord.key)
+          console.error('  Value:', dbRecord.value)
+        }
+        await this.put([...DB_PATH, dbRecord.key], dbRecord.value)
+
+        const db = getDb(dbId)
+        if (db) {
+          db.onConfigUpdated(dbRecord.value)
+        }
       }
       return dbRecord
     } finally {
@@ -177,43 +207,38 @@ export class PrivateServerDB extends BaseHyperbeeDB {
   // Update a database record's cached metadata.
   updateDbRecordCachedMeta (db: PrivateServerDB|GeneralDB|BaseHyperbeeDB): Promise<DbRecord<Database>> {
     if (!db.dbId) throw new Error('Cannot update record cached meta: database not hydrated')
-    return this.updateDbRecord(db.dbId, dbRecord => {
+    const auth = new Auth('system', MY_SKEY || 'system')
+    return this.updateDbRecord(auth, db.dbId, dbRecord => {
       if (!dbRecord.value) return false
       if (!dbRecord.value.cachedMeta) {
         dbRecord.value.cachedMeta = {}
       }
-      if (
-        (dbRecord.value.cachedMeta.displayName === db.displayName)
-        && (dbRecord.value.cachedMeta.writable === db.writable)
-      ) {
+      if (dbRecord.value.cachedMeta.writable === db.writable) {
         return false
       }
-      dbRecord.value.cachedMeta.displayName = db.displayName
       dbRecord.value.cachedMeta.writable = db.writable
       return true
     })
   }
 
   // Update the configuration of a database's attachment to an application.
-  configureServiceDbAccess (auth: Auth, dbId: string, config: DbSettings = {}): Promise<DbRecord<Database>> {
-    return this.updateDbRecord(dbId, dbRecord => {
+  configureDb (auth: Auth, dbId: string, config: DbAdminConfig = {}): Promise<DbRecord<Database>> {
+    return this.updateDbRecord(auth, dbId, dbRecord => {
       if (!dbRecord.value) return false
-      if (!dbRecord.value.services) dbRecord.value.services = []
-      let access = dbRecord.value.services.find(a => a.serviceKey === auth.serviceKey)
-      if (!access) {
-        access = {
-          serviceKey: auth.serviceKey,
-          persist: false,
-          presync: false
+      let hasChanged = false
+      const apply = (key: (keyof DbAdminConfig & keyof Database)) => {
+        if (defined(config[key]) && config[key] !== dbRecord.value[key]) {
+          hasChanged = true
+          // @ts-ignore can't get TS happy with dbRecord.value here, not sure why -prf
+          dbRecord.value[key] = config[key]
         }
-        dbRecord.value.services.push(access)
       }
-
-      if (defined(config.alias)) access.alias = config.alias
-      if (defined(config.persist)) access.persist = config.persist
-      if (defined(config.presync)) access.presync = config.presync
-      
-      return true
+      apply('alias')
+      apply('access')
+      if (config.owner) {
+        apply('owner')
+      }
+      return hasChanged
     })
   }
 }

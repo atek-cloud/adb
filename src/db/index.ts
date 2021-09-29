@@ -1,13 +1,14 @@
 import * as hyperspace from './hyperspace.js'
-import { BaseHyperbeeDB, SetupOpts, DbRecord, Auth } from './base.js'
-import { PrivateServerDB, ServiceDbConfig } from './private-server-db.js'
+import { BaseHyperbeeDB, SetupOpts, DbRecord } from './base.js'
+import { PrivateServerDB } from './private-server-db.js'
+import { Auth } from './permissions.js'
 import { HYPER_KEY, normalizeDbId } from '../lib/strings.js'
 import { CaseInsensitiveMap } from '../lib/map.js'
 import lock from '../lib/lock.js'
 import { defined } from '../lib/functions.js'
 
-import { AdbProcessConfig, DbSettings } from '@atek-cloud/adb-api'
-import { Database, DatabaseNetworkAccess } from '@atek-cloud/adb-tables'
+import { AdbProcessConfig, DbConfig, DbAdminConfig, DbInfo } from '@atek-cloud/adb-api'
+import { DB_PATH, Database, DatabaseAccess } from './schemas.js'
 
 const SWEEP_INACTIVE_DBS_INTERVAL = 10e3
 
@@ -66,27 +67,24 @@ export function getDbByDkey (dkey: string): PrivateServerDB|GeneralDB|undefined 
 // Get or load a database.
 // The access settings by `auth.serviceKey` is tracked automatically in the database.
 export async function loadDb (auth: Auth, dbId: string): Promise<PrivateServerDB|GeneralDB> {
-  if (!privateServerDb || !privateServerDb.databases) {
-    throw new Error('Cannot resolve alias: server db not available')
+  if (!privateServerDb) {
+    throw new Error('Server db not available')
   }
-  if (!auth.serviceKey) throw new Error(`Not authorized`)
   if (!dbId) throw new Error(`Must provide a dbId to loadDb()`)
   dbId = normalizeDbId(dbId)
+  await auth.assertCanReadDatabase(dbId)
   const release = await lock(`load-db:${dbId}`)
   try {
     if (dbId === privateServerDb.dbId) return privateServerDb
-    const dbRecord = (await privateServerDb.databases.get<Database>(dbId))
+    const dbRecord: DbRecord<Database> | undefined = (await privateServerDb.get<Database>([...DB_PATH, dbId]))
     let db = getDb(dbId)
     if (!db) {
       db = new GeneralDB({
         key: dbId,
-        network: dbRecord?.value?.network || {access: 'public'}
+        access: (dbRecord?.value?.access || DatabaseAccess.public) as DatabaseAccess
       })
       await db.setup({create: false})
       dbs.set(dbId, db)
-    }
-    if (auth.serviceKey !== 'system' && !dbRecord?.value?.services?.find(a => a.serviceKey === auth.serviceKey)) {
-      await privateServerDb.configureServiceDbAccess(auth, dbId, {persist: false})
     }
     return db
   } catch (e) {
@@ -100,44 +98,31 @@ export async function loadDb (auth: Auth, dbId: string): Promise<PrivateServerDB
 
 // Resolves an app's db alias to its dbId
 export async function resolveAlias (auth: Auth, alias: string): Promise<string|undefined> {
-  if (!privateServerDb || !privateServerDb.databases) {
+  if (!privateServerDb) {
     throw new Error('Cannot resolve alias: server db not available')
   }
   if (HYPER_KEY.test(alias)) return alias
-  const dbRecords = await privateServerDb.databases.list<Database>()
-  const dbRecord = dbRecords.find(r => r.value?.services?.find(a => a.serviceKey === auth.serviceKey && a.alias === alias))
+  const dbRecords = await privateServerDb.list<Database>(DB_PATH)
+  const dbRecord = dbRecords.find(r => r.value?.alias === alias && r.value?.owner?.serviceKey === auth.serviceKey)
   if (dbRecord?.value) {
     return dbRecord.value.dbId
   }
 }
 
-export async function createDb (auth: Auth, opts: DbSettings): Promise<GeneralDB> {
+export async function createDb (auth: Auth, config: DbConfig): Promise<GeneralDB> {
   if (!privateServerDb) {
     throw new Error('Cannot create new db: server db not available')
   }
-  const netAccess = (opts.network?.access || 'public') as DatabaseNetworkAccess
-  const db = new GeneralDB({network: {access: netAccess}})
-  await db.setup({
-    create: true,
-    displayName: opts.displayName,
-    tables: (opts.tables || []).map(table => {
-      const [domain, name] = table.split('/')
-      return {domain, name}
-    }),
-  })
+  const access = (config.access || 'public') as DatabaseAccess
+  const db = new GeneralDB({access})
+  await db.setup({create: true})
   if (db.dbId) {
     dbs.set(db.dbId, db)
-    await privateServerDb.updateDbRecord(db.dbId, dbRecord => {
+    await privateServerDb.updateDbRecord(auth, db.dbId, dbRecord => {
       if (!dbRecord.value) return false
-      dbRecord.value.owningUserKey = auth.userKey
-      dbRecord.value.network = {access: netAccess}
-      dbRecord.value.services = [{
-        serviceKey: auth.serviceKey,
-        alias: opts.alias,
-        persist: defined(opts.persist) ? opts.persist : true,
-        presync: defined(opts.presync) ? opts.presync : false
-      }]
-      dbRecord.value.createdBy = {serviceKey: auth.serviceKey}
+      dbRecord.value.owner = {userKey: auth.userKey, serviceKey: auth.serviceKey}
+      dbRecord.value.access = access
+      dbRecord.value.alias = config.alias
       dbRecord.value.createdAt = (new Date()).toISOString()
       return true
     })
@@ -146,7 +131,7 @@ export async function createDb (auth: Auth, opts: DbSettings): Promise<GeneralDB
 }
 
 // Get a database by an application's alias ID. If a db does not exist at that alias, this function will create one.
-export async function getOrCreateDbByAlias (auth: Auth, alias: string, settings: DbSettings): Promise<PrivateServerDB|GeneralDB> {
+export async function getOrCreateDbByAlias (auth: Auth, alias: string, config: DbConfig): Promise<PrivateServerDB|GeneralDB> {
   const release = await lock(`get-or-create-db:${alias}`)
   try {
     const dbId = await resolveAlias(auth, alias)
@@ -155,7 +140,7 @@ export async function getOrCreateDbByAlias (auth: Auth, alias: string, settings:
       if (!db) throw new Error(`Failed to load database: ${alias} (${dbId})`)
       return db
     } else {
-      return createDb(auth, Object.assign({}, settings, {alias}))
+      return createDb(auth, Object.assign({}, config, {alias}))
     }
   } finally {
     release()
@@ -163,22 +148,57 @@ export async function getOrCreateDbByAlias (auth: Auth, alias: string, settings:
 }
 
 // List databases attached to an application.
-export function listServiceDbs (auth: Auth): Promise<ServiceDbConfig[]> {
+export function listServiceDbs (auth: Auth): Promise<DbInfo[]> {
   if (!privateServerDb) {
     throw new Error('Cannot list app db records: server db not available')
   }
   return privateServerDb.listServiceDbs(auth)
 }
 
-export function listUserDbs (auth: Auth, userKey: string): Promise<ServiceDbConfig[]> {
+export function adminListDbsByOwningUser (auth: Auth, userKey: string): Promise<DbInfo[]> {
   if (!privateServerDb) {
     throw new Error('Cannot list app db records: server db not available')
   }
-  return privateServerDb.listUserDbs(auth, userKey)
+  return privateServerDb.adminListDbsByOwningUser(auth, userKey)
+}
+
+export async function adminCreateDb (auth: Auth, config: DbAdminConfig): Promise<GeneralDB> {
+  if (!privateServerDb) {
+    throw new Error('Cannot create db: server db not available')
+  }
+
+  const owner = config.owner
+  const alias = config.alias
+  const access = (config.access || 'public') as DatabaseAccess
+
+  // run this assert early to avoid creating more DBs than needed
+  await auth.assertCanWriteDatabaseRecord(undefined, {dbId: '', owner, alias, access, createdAt: ''})
+
+  const db = new GeneralDB({access})
+  await db.setup({create: true})
+  if (db.dbId) {
+    dbs.set(db.dbId, db)
+    await privateServerDb.updateDbRecord(auth, db.dbId, dbRecord => {
+      if (!dbRecord.value) return false
+      dbRecord.value.owner = config.owner
+      dbRecord.value.alias = config.alias
+      dbRecord.value.access = access
+      dbRecord.value.createdAt = (new Date()).toISOString()
+      return true
+    })
+  }
+  return db
+}
+
+export function adminDeleteDb (auth: Auth, dbId: string) {
+  if (!privateServerDb) {
+    throw new Error('Server db not available')
+  }
+  return privateServerDb.adminDeleteDb(auth, dbId)
 }
 
 // Update the configuration of a database's attachment to an application.
-export async function configureServiceDbAccess (auth: Auth, dbId: string, settings: DbSettings): Promise<DbRecord<Database>> {
+export async function configureDb (auth: Auth, dbId: string, config: DbConfig): Promise<DbRecord<Database>> {
   if (!privateServerDb) {
     throw new Error('Cannot configure app db access: server db not available')
   }
@@ -187,17 +207,11 @@ export async function configureServiceDbAccess (auth: Auth, dbId: string, settin
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  const res = await privateServerDb.configureServiceDbAccess(auth, dbId, settings)
-
-  if (defined(settings.displayName)) {
-    const db = await loadDb(auth, dbId)
-    await db.updateDesc({displayName: settings.displayName})
-  }
-
-  return res
+  // TODO: react to an 'access' change
+  return privateServerDb.configureDb(auth, dbId, config)
 }
 
-export async function getServiceDbConfig (auth: Auth, dbId: string): Promise<ServiceDbConfig> {
+export async function getDbConfig (auth: Auth, dbId: string): Promise<DbConfig> {
   if (!privateServerDb) {
     throw new Error('Cannot get app db access: server db not available')
   }
@@ -206,7 +220,19 @@ export async function getServiceDbConfig (auth: Auth, dbId: string): Promise<Ser
     if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
     dbId = resolvedDbId
   }
-  return privateServerDb.getServiceDb(auth, dbId)
+  return privateServerDb.getDbConfig(auth, dbId)
+}
+
+export async function getDbInfo (auth: Auth, dbId: string): Promise<DbInfo> {
+  if (!privateServerDb) {
+    throw new Error('Cannot get app db access: server db not available')
+  }
+  if (!HYPER_KEY.test(dbId)) {
+    const resolvedDbId = await resolveAlias(auth, dbId)
+    if (!resolvedDbId) throw new Error(`Invalid database ID: ${dbId}`)
+    dbId = resolvedDbId
+  }
+  return privateServerDb.getDbInfo(auth, dbId)
 }
 
 // Waits for all databases to finish their sync events.
@@ -216,20 +242,6 @@ export async function whenAllSynced (): Promise<void> {
     await db.whenSynced()
   }
 }
-
-// Checks whether a blob is locally available.
-// TODO May no longer be needed, or may need to be updated.
-// export async function isRecordBlobCached (dbUrl: string, blobName: string): Promise<boolean> {
-//   const urlp = new URL(dbUrl)
-//   const db = dbs.get(urlp.hostname)
-//   const pathParts = urlp.pathname.split('/').filter(Boolean)
-//   const table = db.getTable(`${pathParts[0]}/${pathParts[1]}`)
-//   return await table.isBlobCached(pathParts[2], blobName)
-// }
-
-// internal methods
-// =
-
 
 // Looks for any databases which are not in use and unloads them.
 async function sweepInactiveDbs (): Promise<void> {
@@ -244,7 +256,6 @@ async function sweepInactiveDbs (): Promise<void> {
 export class GeneralDB extends BaseHyperbeeDB {
   async setup (opts: SetupOpts) {
     await super.setup(opts)
-    await this.blobs.setup()
   }
 
   async onMetaUpdated () {

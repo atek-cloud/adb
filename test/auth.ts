@@ -2,7 +2,7 @@ import test from 'ava'
 import * as atek from '@atek-cloud/atek'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
-import adb, {createClient as createAdbClient} from '@atek-cloud/adb-api'
+import adb from '@atek-cloud/adb-api'
 adb.api.$setEndpoint({port: 10000})
 
 const HERE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -50,13 +50,9 @@ test.serial('Access a database from a user application', async t => {
 
   const desc1 = await authApp1Api.call('createDb', [])
   t.is(typeof desc1.dbId, 'string', 'database created')
-  t.is(desc1.tables.length, 1, '1 table registered')
-  t.is(desc1.tables[0].tableId, 'auth-app.com/test', 'Test records table ID is correct')
   
   const desc2 = await authApp1Api.call('getDb', [])
   t.is(desc2.dbId, desc1.dbId, 'Same database returned')
-  t.is(desc2.tables.length, 1, '1 table registered')
-  t.is(desc2.tables[0].tableId, 'auth-app.com/test', 'Test records table ID is correct')
 
   const appDbs1 = await authApp1Api.call('listDbs', [])
   t.is(appDbs1.length, 1, 'One database')
@@ -71,12 +67,9 @@ test.serial('Access a database from a user application', async t => {
 
   const desc3 = await authApp2Api.call('createDb', [])
   t.is(typeof desc3.dbId, 'string', 'database created')
-  t.is(desc3.tables.length, 1, '1 table registered')
-  t.is(desc3.tables[0].tableId, 'auth-app.com/test', 'Test records table ID is correct')
 
   const appDbs3 = await authApp1Api.call('listDbs', [])
   t.is(appDbs3.length, 1, 'Still one database')
-  t.is(appDbs3[0].dbId, desc1.dbId, 'Is still the database we created')
 
   const systemUserDbs1 = await adb.api.adminListDbsByOwningUser('system')
   t.is(systemUserDbs1.length, 2, 'System owns 2 dbs')

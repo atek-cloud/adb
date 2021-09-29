@@ -1,4 +1,8 @@
 {
+  "name": "Atek DB",
+  "description": "A database with convenient networked data-sharing.",
+  "author": "Paul Frazee <pfrazee@gmail.com>",
+  "frame": true,
   "exports": [
     {"api": "atek.cloud/adb-api", "path": "/_api/adb"}
   ]

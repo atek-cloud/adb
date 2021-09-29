@@ -1,62 +1,35 @@
 import EventEmitter from 'events'
-import { Readable, Transform } from 'stream'
+import { Readable } from 'stream'
 import _debounce from 'lodash.debounce'
-import { RemoteHypercore } from 'hyperspace'
 import { client } from './hyperspace.js'
 import Hyperbee from 'hyperbee'
-import { TableSchema } from '../schemas/schema.js'
-import { createValidator } from '../schemas/util.js'
-import pumpify from 'pumpify'
 import pump from 'pump'
 import concat from 'concat-stream'
-import through2 from 'through2'
-import bytes from 'bytes'
 import lock from '../lib/lock.js'
-import { constructEntryUrl } from '../lib/strings.js'
-import { TableSettings, NetworkSettings } from '@atek-cloud/adb-api'
+import { Database, DatabaseAccess } from './schemas.js'
 
 const READ_TIMEOUT = 10e3
 const BACKGROUND_INDEXING_DELAY = 5e3 // how much time is allowed to pass before globally indexing an update
-const BLOBS_RETRY_SETUP_INTERVAL = 5e3
-const BLOB_CHUNK_SIZE = bytes('64kb')
 const KEEP_IN_MEMORY_TTL = 15e3
-
-interface FeedInfo {
-  writable: boolean
-  key: Buffer
-  discoveryKey: Buffer
-}
 
 interface BeeInfo {
   writable: boolean
   discoveryKey?: Buffer
 }
 
-export interface Auth {
-  userKey: string
-  serviceKey: string
-}
-
 export interface BaseHyperbeeDBOpts {
   key?: string | Buffer
-  network?: NetworkSettings
+  access?: DatabaseAccess
 }
 
 export interface SetupOpts {
   create?: boolean
-  displayName?: string
   tables?: ({domain: string, name: string})[]
 }
 
-export interface BlobPointer {
-  start: number
-  end: number
-  mimeType?: string
-}
-
 export interface DbRecord<T> {
-  seq?: number
   key: string
+  seq?: number
   value: T
 }
 
@@ -67,13 +40,10 @@ export interface DbDiff<T> {
 
 export interface DbDesc {
   didFailLoad?: boolean
-  displayName?: string
   blobsFeedKey?: string
-  tables?: ({domain?: string, name?: string, rev?: number})[]
 }
 
-export interface TableListOpts {
-  validate?: boolean
+export interface ListOpts {
   timeout?: number
   gt?: string
   gte?: string
@@ -84,68 +54,36 @@ export interface TableListOpts {
 }
 
 export interface ReadCursor<T> {
-  opts?: TableListOpts,
+  opts?: ListOpts,
   db: BaseHyperbeeDB,
   next: (limit?: number) => Promise<DbRecord<T>[]|null>
 }
 
-const uwgDescription = createValidator({
-  type: 'object',
-  properties: {
-    displayName: {type: 'string'},
-    blobsFeedKey: {
-      type: 'string',
-      pattern: '^[a-f0-9]{64}$'
-    },
-    tables: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          domain: {type: 'string'},
-          name: {type: 'string'},
-          rev: {type: 'number'}
-        }
-      }
-    }
-  }
-})
-
-const blobPointer = createValidator({
-  type: 'object',
-  required: ['start', 'end', 'mimeType'],
-  properties: {
-    start: {type: 'number'},
-    end: {type: 'number'},
-    mimeType: {type: 'string'}
-  }
-})
-
 export class BaseHyperbeeDB extends EventEmitter {
   key: Buffer | undefined
-  network: NetworkSettings
+  access: DatabaseAccess
   desc: DbDesc | undefined
   dbId: string | undefined
   bee: Hyperbee | undefined
   beeInfo: BeeInfo
-  blobs: Blobs
-  tables: {[schemaId: string]: Table}
   lastAccess: number
   lock: (id: string) => (Promise<() => void>)
 
   constructor (opts: BaseHyperbeeDBOpts = {}) {
     super()
     const key = (opts.key && typeof opts.key === 'string' ? Buffer.from(opts.key, 'hex') : opts.key) as Buffer|undefined
-    this.network = {access: opts?.network?.access || 'public'}
+    this.access = (opts.access || 'public') as DatabaseAccess
     this.desc = undefined
     this.key = key || undefined
     this.dbId = this.key?.toString('hex')
     this.bee = undefined
     this.beeInfo = {writable: false, discoveryKey: undefined}
-    this.blobs = new Blobs(this, {network: this.network})
-    this.tables = {}
     this.lastAccess = 0
     this.lock = (id = '') => lock(`${this.dbId}:${id}`)
+  }
+
+  lockPath (path: string[]) {
+    return this.lock(`/${path.join('/')}`)
   }
 
   get isInMemory (): boolean {
@@ -172,12 +110,6 @@ export class BaseHyperbeeDB extends EventEmitter {
     return this.beeInfo?.discoveryKey
   }
 
-  get displayName (): string {
-    if (this.desc?.displayName) return this.desc?.displayName
-    if (this.dbId) return `${this.dbId.slice(0, 6)}..${this.dbId.slice(-2)}`
-    return ''
-  }
-
   async setup (opts: SetupOpts = {}): Promise<void> {
     if (!client) {
       throw new Error('Unable to setup db: hyperspace client is not active')
@@ -198,7 +130,7 @@ export class BaseHyperbeeDB extends EventEmitter {
       })
       await this.bee.ready()
       this.beeInfo = {writable: this.bee.feed.writable, discoveryKey: this.bee.feed.discoveryKey}
-      if (this.network.access !== 'private') {
+      if (this.access !== DatabaseAccess.private) {
         client.replicate(this.bee.feed)
       }
 
@@ -206,9 +138,7 @@ export class BaseHyperbeeDB extends EventEmitter {
         this.key = this.bee.feed.key
         this.dbId = this.key?.toString('hex')
         await this.onDatabaseCreated()
-        await this.updateDesc({displayName: opts.displayName, tables: opts.tables})
       }
-      await this.loadDesc()
     } finally {
       release()
     }
@@ -220,8 +150,7 @@ export class BaseHyperbeeDB extends EventEmitter {
       if (!this.isInMemory) return
       const bee = this.bee
       this.bee = undefined
-      if (this.blobs) await this.blobs.teardown({unswarm})
-      if (bee && this.network.access !== 'private' && unswarm && client) {
+      if (bee && this.access !== DatabaseAccess.private && unswarm && client) {
         client.network.configure(bee.feed, {announce: false, lookup: false})
       }
       await bee?.feed?.close()
@@ -237,56 +166,24 @@ export class BaseHyperbeeDB extends EventEmitter {
     }
   }
 
-  async loadDesc (): Promise<void> {
-    const release = await this.lock(`update-db-desc`)
-    try {
-      if (!this.bee) throw new Error('Cannot get metadata: db is not hydrated')
-      const desc = await this.bee.get('uwg', {timeout: READ_TIMEOUT})
-      if (desc) {
-        uwgDescription.assert(desc.value)
-        this.desc = desc.value
-      } else {
-        this.desc = {
-          didFailLoad: true,
-          blobsFeedKey: undefined
-        }
-      }
-    } finally {
-      release()
-    }
-  }
-
-  async updateDesc (updates: DbDesc | ((object: DbDesc) => DbDesc)): Promise<void> {
-    await this.touch()
-    const release = await this.lock(`update-db-desc`)
-    try {
-      this.desc = this.desc || {}
-      if (updates) {
-        if (typeof updates === 'function') {
-          this.desc = updates(this.desc)
-        } else {
-          Object.assign(this.desc, updates)
-        }
-      }
-      uwgDescription.assert(this.desc)
-      if (!this.bee) throw new Error('Cannot write metadata: db is not hydrated')
-      await this.bee.put('uwg', this.desc)
-    } catch (e) {
-      console.error('Failed to update database uwg record')
-      console.error('Db id:', this.dbId)
-      console.error('Update:', updates)
-      console.error(e.toString())
-      throw e
-    } finally {
-      release()
-    }
-    this.onMetaUpdated()
-  }
-
   async onDatabaseCreated (): Promise<void> {
   }
 
   async onMetaUpdated (): Promise<void> {
+  }
+
+  onConfigUpdated (dbValue: Database): void {
+    if (this.access !== dbValue.access) {
+      this.access = (dbValue.access as DatabaseAccess)
+      if (!client || !this.key) return
+      if (this.access === 'private') {
+        console.log('Unswarming', this.dbId, 'due to config change')
+        client.network.configure(this.key, {announce: false, lookup: false})
+      } else {
+        console.log('Swarming', this.dbId, 'due to config change')
+        client.network.configure(this.key, {announce: true, lookup: true})
+      }
+    }
   }
 
   async whenSynced (): Promise<void> {
@@ -304,351 +201,58 @@ export class BaseHyperbeeDB extends EventEmitter {
     this.bee.feed.on('append', () => cb())
   }
 
-  table (tableId: string, definition?: TableSettings): Table {
-    if (this.tables[tableId]) {
-      if (!definition?.revision || definition.revision <= (this.tables[tableId].schema.revision || 0)) {
-        return this.tables[tableId]
-      }
+  subAtPath (path: string|string[]): {bee?: Hyperbee} {
+    const parts = Array.isArray(path) ? path : path?.split?.('/')?.filter(Boolean)
+    if (!parts) throw new Error(`Invalid path: ${path}`)
+    let bee = this.bee
+    for (let i = 0; i < parts.length; i++) {
+      bee = bee?.sub(parts[i])
     }
-    if (!definition) {
-      throw new Error(`Table not found and no definition was provided: ${tableId}`)
+    return {bee}
+  }
+
+  keyAtPath (path: string|string[]): {bee?: Hyperbee, key: string} {
+    const parts = Array.isArray(path) ? path : path?.split?.('/')?.filter(Boolean)
+    if (!parts) throw new Error(`Invalid path: ${path}`)
+    let bee = this.bee
+    for (let i = 0; i < parts.length - 1; i++) {
+      bee = bee?.sub(parts[i])
     }
-    this.tables[tableId] = new Table(this, new TableSchema(tableId, definition))
-    return this.tables[tableId]
+    return {bee, key: parts[parts.length - 1]}
   }
 
-  async ensureTableIsInMetadata (schema: TableSchema) {
-    // TODO
-    // if (this.desc.tables?.find?.(t => t.domain === schema.domain && t.name === schema.name && t.rev >= schema.rev)) {
-    //   return
-    // }
-    // await this.updateDesc(desc => {
-    //   desc.tables = desc.tables || []
-    //   const existing = desc.tables.find(t => t.domain === schema.domain && t.name === schema.name)
-    //   if (existing) {
-    //     existing.rev = schema.rev
-    //   } else {
-    //     desc.tables.push({domain: schema.domain, name: schema.name, rev: schema.rev})
-    //   }
-    //   return desc
-    // })
-  }
-}
-
-class Blobs {
-  db: BaseHyperbeeDB
-  feed: RemoteHypercore | undefined
-  feedInfo: FeedInfo | undefined
-  network: NetworkSettings
-
-  constructor (db: BaseHyperbeeDB, {network}: {network:  NetworkSettings}) {
-    this.db = db
-    this.feed = undefined
-    this.feedInfo = undefined
-    this.network = network
+  async get<T> (path: string|string[]): Promise<DbRecord<T>> {
+    await this.touch()
+    const {bee, key} = this.keyAtPath(path)
+    return bee?.get(String(key), {timeout: READ_TIMEOUT})
   }
 
-  get writable (): boolean {
-    return this.feedInfo?.writable || false
+  async put (path: string|string[], value: any): Promise<void> {
+    await this.touch()
+    const {bee, key} = this.keyAtPath(path)
+    return bee?.put(String(key), value)
   }
 
-  get peers () {
-    return this.feed?.peers || []
+  async del (path: string|string[]): Promise<void> {
+    await this.touch()
+    const {bee, key} = this.keyAtPath(path)
+    return bee?.del(String(key))
   }
 
-  get key (): Buffer | undefined {
-    return this.feedInfo?.key
-  }
-
-  get discoveryKey (): Buffer | undefined {
-    return this.feedInfo?.discoveryKey
-  }
-
-  async setup (): Promise<void> {
-    if (this.feed) {
-      return // already setup
-    }
-    if (!client) {
-      throw new Error('Failed to setup blobs: hyperspace client not active')
-    }
-    if (this.db.desc?.didFailLoad && !this.writable) {
-      console.log('Failed to load database description for external database', this.db.dbId, '- periodically retrying')
-      return this.periodicallyRetrySetup()
-    } else if (!this.db.desc?.blobsFeedKey) {
-      if (this.db.writable) {
-        this.feed = client.corestore().get(null)
-        await this.feed.ready()
-        this.feedInfo = {writable: this.feed.writable, key: this.feed.key, discoveryKey: this.feed.discoveryKey}
-        await this.db.updateDesc({blobsFeedKey: this.feed.key.toString('hex')})
-      }
-    } else {
-      this.feed = client.corestore().get(Buffer.from(this.db.desc?.blobsFeedKey, 'hex'))
-      await this.feed.ready()
-      this.feedInfo = {writable: this.feed.writable, key: this.feed.key, discoveryKey: this.feed.discoveryKey}
-    }
-    if (this.feed && this.network.access !== 'private') {
-      client.replicate(this.feed)
-    }
-  }
-
-  async periodicallyRetrySetup (): Promise<void> {
-    // this function is called when a remote bee fails to load a db description
-    if (!this.db.isInMemory) return
-    await this.db.loadDesc()
-    if (this.db.desc && !this.db.desc.didFailLoad) {
-      console.log('Resolved missing database description for external database', this.db.dbId)
-      await this.setup()
-      return
-    }
-    setTimeout(() => this.periodicallyRetrySetup(), BLOBS_RETRY_SETUP_INTERVAL)
-  }
-
-  teardown ({unswarm} = {unswarm: false}): void {
-    if (!this.feed) return
-    if (this.network.access !== 'private' && unswarm && client) {
-      client.network.configure(this.feed, {announce: false, lookup: false})
-    }
-    this.feed = undefined
-  }
-
-  async createReadStream (pointerValue: BlobPointer): Promise<Readable> {
-    if (!this.feed) throw new Error('Unable to get blob: blob feed not initialized')
-    await this.db.touch()
-    return this.feed.createReadStream({
-      start: pointerValue.start,
-      end: pointerValue.end,
-      timeout: READ_TIMEOUT
-    })
-  }
-
-  async get (pointerValue: BlobPointer): Promise<Buffer> {
-    const stream = await this.createReadStream(pointerValue)
-    return new Promise((resolve, reject) => {
-      pump(
-        stream,
-        concat({encoding: 'buffer'}, resolve),
-        reject
-      )
-    })
-  }
-
-  download (pointerValue: BlobPointer) {
-    if (!this.feed) throw new Error('Unable to download blob: blob feed not initialized')
-    return this.feed.download(pointerValue.start, pointerValue.end)
-  }
-
-  async isCached (pointerValue: BlobPointer): Promise<boolean> {
-    if (!this.feed) throw new Error('Unable to read blob: blob feed not initialized')
-    for (let i = pointerValue.start; i <= pointerValue.end; i++) {
-      if (!(await this.feed.has(i))) return false
-    }
-    return true
-  }
-
-  async put (buf: Buffer): Promise<BlobPointer> {
-    if (!this.feed) throw new Error('Unable to put blob: blob feed not initialized')
-    const chunks = chunkify(buf, BLOB_CHUNK_SIZE)
-    const start = await this.feed.append(chunks)
-    return {start, end: start + chunks.length}
-  }
-
-  async decache (pointerValue: BlobPointer) {
-    // TODO hyperspace needs to export a clear command to do this
-    // await this.feed.clear(pointerValue.start, pointerValue.end)
-  }
-}
-
-export class Table {
-  db: BaseHyperbeeDB
-  _bee: Hyperbee | undefined
-  schema: TableSchema
-  _schemaDomain: string
-  _schemaName: string
-  lock: (id: string) => (Promise<() => void>)
-
-  constructor (db: BaseHyperbeeDB, schema: TableSchema) {
-    const [domain, name] = schema.tableId.split('/')
-    this.db = db
-    this._bee = undefined
-    this.schema = schema
-    this._schemaDomain = domain
-    this._schemaName = name
-    this.lock = (id = '') => this.db.lock(`${this.schema.tableId}:${id}`)
-  }
-
-  teardown () {
-  }
-
-  get bee (): Hyperbee {
-    if (!this.db.bee) throw new Error('Cannot access database: db is not hydrated')
-    if (!this._bee || this._bee.feed !== this.db.bee?.feed) {
-      // bee was unloaded since last cache, recreate from current bee
-      this._bee = this.db.bee.sub(this._schemaDomain).sub(this._schemaName)
-    }
-    return this._bee
-  }
-
-  getBlobsSub (key: string): Hyperbee {
-    return this.bee.sub(key).sub('blobs')
-  }
-
-  constructBeeKey (key: string): Buffer {
-    return this.bee.keyEncoding.encode(key)
-  }
-
-  constructEntryUrl (key: string): string {
-    return constructEntryUrl(this.db.url, this.schema.tableId, key)
-  }
-
-  async get<T> (key: string): Promise<DbRecord<T>> {
-    await this.db.touch()
-    const entry = await this.bee.get(String(key), {timeout: READ_TIMEOUT})
-    if (entry) {
-      this.schema.assertValid(entry.value)
-    }
-    return entry
-  }
-
-  async listBlobPointers (key: string): Promise<DbRecord<BlobPointer>[]> {
-    await this.db.touch()
-    return new Promise((resolve, reject) => {
-      pump(
-        this.getBlobsSub(key).createReadStream({timeout: READ_TIMEOUT}),
-        through2.obj(function (this: Transform, entry, enc, cb) {
-          const valid = blobPointer.validate(entry.value)
-          if (valid) this.push(entry)
-          cb()
-        }),
-        concat(resolve),
-        (err: any) => {
-          if (err) reject(err)
-        }
-      )
-    })
-  }
-
-  async getBlobPointer (key: string, blobName: string): Promise<DbRecord<BlobPointer>> {
-    await this.db.touch()
-    const pointer = await this.getBlobsSub(key).get(blobName)
-    if (!pointer) throw new Error('Blob not found')
-    this.schema.assertBlobMimeTypeValid(blobName, pointer.value.mimeType)
-    blobPointer.assert(pointer.value)
-    return pointer
-  }
-
-  async isBlobCached (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>): Promise<boolean> {
-    let pointer = blobNameOrPointer
-    if (typeof pointer === 'string') {
-      pointer = await this.getBlobPointer(key, pointer)
-    }
-    if (!pointer.value) throw new Error('Blob not found')
-    return this.db.blobs.isCached(pointer.value)
-  }
-
-  async getBlob (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>, encoding: BufferEncoding|undefined = undefined): Promise<{mimeType?: string, buf: Buffer|string}> {
-    let pointer = blobNameOrPointer
-    if (typeof pointer === 'string') {
-      pointer = await this.getBlobPointer(key, pointer)
-    }
-    if (!pointer.value) throw new Error('Blob not found')
-    const buf = await this.db.blobs.get(pointer.value)
-    if (typeof blobNameOrPointer === 'string') {
-      this.schema.assertBlobSizeValid(blobNameOrPointer, buf.length)
-    }
-    return {
-      mimeType: pointer.value.mimeType,
-      buf: encoding && encoding !== 'binary' ? buf.toString(encoding) : buf
-    }
-  }
-
-  async createBlobReadStream (key: string, blobNameOrPointer: string|DbRecord<BlobPointer>): Promise<Readable> {
-    let pointer = blobNameOrPointer
-    if (typeof pointer === 'string') {
-      pointer = await this.getBlobPointer(key, pointer)
-    }
-    if (!pointer.value) throw new Error('Blob not found')
-    return this.db.blobs.createReadStream(pointer.value)
-  }
-
-  async downloadBlobs (key: string): Promise<void> {
-    await this.db.touch()
-    const pointers = await this.listBlobPointers(key)
-    if (!pointers?.length) return
-    for (const pointer of pointers) {
-      if (!pointer.value) continue
-      try {
-        this.schema.assertBlobMimeTypeValid(pointer.key, pointer.value.mimeType)
-        blobPointer.assert(pointer.value)
-        await this.db.blobs.download(pointer.value)
-      } catch (e) {}
-    }
-  }
-
-  async put (key: string, value: any): Promise<void> {
-    await this.db.touch()
-    this.schema.assertValid(value)
-    await this.db.ensureTableIsInMetadata(this.schema)
-    const res = await this.bee.put(String(key), value)
-    return res
-  }
-
-  async putBlob (key: string, blobName: string, buf: Buffer, {mimeType}: {mimeType?: string}): Promise<void> {
-    await this.db.touch()
-    this.schema.assertBlobMimeTypeValid(blobName, mimeType)
-    this.schema.assertBlobSizeValid(blobName, buf.length)
-    const pointerValue = await this.db.blobs.put(buf)
-    pointerValue.mimeType = mimeType
-    blobPointer.assert(pointerValue)
-    await this.db.ensureTableIsInMetadata(this.schema)
-    await this.getBlobsSub(key).put(blobName, pointerValue)
-  }
-
-  async del (key: string): Promise<void> {
-    await this.db.touch()
-    const res = await this.bee.del(String(key))
-    /* dont await */ this.delAllBlobs(String(key))
-    return res
-  }
-
-  async delBlob (key: string, blobName: string): Promise<void> {
-    blobName = String(blobName)
-    const pointer = await this.getBlobPointer(key, blobName)
-    if (pointer.value) await this.db.blobs.decache(pointer.value)
-    await this.getBlobsSub(key).del(blobName)
-  }
-
-  async delAllBlobs (key: string): Promise<void> {
-    const pointers = await this.listBlobPointers(key)
-    for (const pointer of pointers) {
-      if (pointer.value) await this.db.blobs.decache(pointer.value)
-      await this.getBlobsSub(key).del(pointer.key)
-    }
-  }
-
-  async createReadStream (opts?: TableListOpts): Promise<Readable> {
-    await this.db.touch()
-    const _this = this
+  async createReadStream (path: string|string[], opts?: ListOpts): Promise<Readable> {
+    await this.touch()
     opts = opts || {}
     opts.timeout = READ_TIMEOUT
-    return pumpify.obj(
-      this.bee.createReadStream(opts),
-      through2.obj(function (entry, enc, cb) {
-        if (opts?.validate === false) {
-          this.push(entry)
-        } else {
-          const valid = _this.schema.validate(entry.value)
-          if (valid) this.push(entry)
-        }
-        cb()
-      })
-    )
+    const {bee} = this.subAtPath(path)
+    return bee?.createReadStream(opts)
   }
 
-  async list<T> (opts?: TableListOpts): Promise<DbRecord<T>[]> {
+  async list<T> (path: string|string[], opts?: ListOpts): Promise<DbRecord<T>[]> {
     // no need to .touch() because createReadStream() does it
     opts = opts || {}
     opts.timeout = READ_TIMEOUT
-    const stream = await this.createReadStream(opts)
+    // return listShallow(this.bee, path)
+    const stream = await this.createReadStream(path, opts)
     return new Promise((resolve, reject) => {
       pump(
         stream,
@@ -660,9 +264,9 @@ export class Table {
     })
   }
 
-  async scanFind<T> (opts: TableListOpts, fn: (record: DbRecord<T>) => boolean): Promise<DbRecord<T>|undefined> {
+  async scanFind<T> (path: string|string[], opts: ListOpts, fn: (record: DbRecord<T>) => boolean): Promise<DbRecord<T>|undefined> {
     // no need to .touch() because createReadStream() does it
-    const rs = await this.createReadStream(opts)
+    const rs = await this.createReadStream(path, opts)
     return new Promise((resolve, reject) => {
       let found = false
       opts = opts || {}
@@ -683,16 +287,16 @@ export class Table {
     })
   }
 
-  cursorRead<T> (opts?: TableListOpts): ReadCursor<T> {
+  cursorRead<T> (path: string|string[], opts?: ListOpts): ReadCursor<T> {
     // no need to .touch() because list() does it
     let lt = opts?.lt
     let atEnd = false
     return {
       opts,
-      db: this.db,
+      db: this,
       next: async (limit?: number): Promise<DbRecord<T>[]|null> => {
         if (atEnd) return null
-        const res = await this.list<T>(Object.assign({}, opts, {lt, limit})).catch(e => [])
+        const res = await this.list<T>(path, Object.assign({}, opts, {lt, limit})).catch(e => [])
         if (res.length === 0) {
           atEnd = true
           return null
@@ -702,55 +306,47 @@ export class Table {
       }
     }
   }
-
-  async listDiff<T> (other: number): Promise<DbDiff<T>[]> {
-    if (!this.db.bee) throw new Error('Cannot listDiff: db is not hydrated')
-    await this.db.touch()
-    /**
-     * HACK
-     * There's a bug in Hyperbee where createDiffStream() breaks on sub()s.
-     * We have to run it without using sub() and then filter the results.
-     * -prf
-     */
-    // const co = this.db.bee.checkout(other).sub(this._schemaDomain).sub(this._schemaName)
-    // return new Promise((resolve, reject) => {
-    //   pump(
-    //     co.createDiffStream(this.bee.version),
-    //     concat(resolve),
-    //     (err: any) => {
-    //       pend()
-    //       if (err) reject(err)
-    //     }
-    //   )
-    // })
-    const co = this.db.bee.checkout(other)
-    const diffs = (await new Promise((resolve, reject) => {
-      pump(
-        co.createDiffStream(this.bee.version),
-        concat(resolve),
-        (err: any) => {
-          if (err) reject(err)
-        }
-      )
-    })) as DbDiff<T>[]
-    const prefix = `${this._schemaDomain}\x00${this._schemaName}\x00`
-    return diffs.filter(diff => {
-      const key = (diff?.right||diff?.left||{}).key
-      if (key?.startsWith(prefix)) {
-        if (diff.left) diff.left.key = diff.left.key.slice(prefix.length)
-        if (diff.right) diff.right.key = diff.right.key.slice(prefix.length)
-        return true
-      }
-      return false
-    })
-  }
 }
 
-function chunkify (buf: Buffer, chunkSize: number): Buffer[] {
-  const chunks = []
-  while (buf.length) {
-    chunks.push(buf.slice(0, chunkSize))
-    buf = buf.slice(chunkSize)
+/*
+const SEP = '\x00'
+const MIN = SEP
+const MAX = Buffer.from([255]).toString('utf8')
+
+async function listShallow<T> (bee: Hyperbee|undefined, path: string|string[]): Promise<DbRecord<T>[]> {
+  if (!bee) return []
+  if (typeof path === 'string') {
+    path = path.split('/').filter(Boolean)
   }
-  return chunks
+
+  var arr: DbRecord<T>[] = []
+  var pathlen = path && path.length > 0 ? path.length : 0
+  var bot = path && path.length > 0 ? pathToKey([...path, MIN]) : MIN
+  var top = path && path.length > 0 ? pathToKey([...path, MAX]) : MAX
+  console.log('listShallow', {path, bot, top})
+  do {
+    console.log('peek', {bot, top})
+    const item = await bee.peek({gt: bot, lt: top})
+    if (!item) return arr
+
+    const itemPath = keyToPath(item.key)
+    if (itemPath.length > pathlen + 1) {
+      const containerPath = itemPath.slice(0, -1)
+      console.log('container hit', {containerPath, bot, top})
+      arr.push({seq: undefined, key: itemPath[containerPath.length - 1], path: `/${containerPath.join('/')}`, hasChildren: true, value: undefined})
+      bot = pathToKey([...containerPath, MAX])
+    } else {
+      console.log('item hit', {itemPath, bot, top})
+      arr.push({seq: item.seq, key: itemPath[itemPath.length - 1], path: `/${itemPath.join('/')}`, hasChildren: false, value: item.value})
+      bot = pathToKey(itemPath)
+    }
+  } while (true)
 }
+
+function keyToPath (key: string): string[] {
+  return key.split(SEP)
+}
+
+function pathToKey (segments: string[]): string {
+  return segments.join(SEP)
+}*/

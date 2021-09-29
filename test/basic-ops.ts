@@ -2,7 +2,7 @@ import test from 'ava'
 import * as atek from '@atek-cloud/atek'
 import * as path from 'path'
 import { fileURLToPath } from 'url'
-import adb, { defineTable } from '@atek-cloud/adb-api'
+import adb, { defineSchema } from '@atek-cloud/adb-api'
 adb.api.$setEndpoint({port: 10000})
 
 const HERE_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -18,7 +18,7 @@ const TEST_RECORD_DEFINITION = {
   },
   "required":["id","createdAt"]
 }
-const TEST_RECORD_TEMPLATES = {"table":{"title":"Test Records","description":"An example table."},"record":{"key":"{{/id}}","title":"Test record ID: {{/id}}"}};
+const TEST_RECORD_PKEY = '/id'
 
 interface TestRecord {
   id: string
@@ -28,9 +28,9 @@ interface TestRecord {
   createdAt: string
 }
 
-const testTable = defineTable<TestRecord>(TEST_RECORD_ID, {
-  templates: TEST_RECORD_TEMPLATES,
-  definition: TEST_RECORD_DEFINITION
+const testTable = defineSchema<TestRecord>(TEST_RECORD_ID, {
+  pkey: TEST_RECORD_PKEY,
+  jsonSchema: TEST_RECORD_DEFINITION
 })
 
 let inst: any
@@ -54,21 +54,6 @@ test.serial('Load test atek instance', async t => {
 
   activeCfg = await inst.api('atek.cloud/inspect-api').call('getConfig')
   t.truthy(activeCfg.serverDbId, 'Server DB ID was created')
-})
-
-test('Register tables', async t => {
-  const db = adb.db({})
-  await db.isReady
-  t.truthy(db.dbId, 'DB successfully created')
-
-  await testTable(db).isReady
-
-  const desc = await db.describe()
-  t.is(desc.dbId, db.dbId, 'Describe() for correct database')
-  t.is(desc.tables.length, 1, '1 table registered')
-  t.is(desc.tables[0].tableId, TEST_RECORD_ID, 'Test records table ID is correct')
-  t.deepEqual(desc.tables[0].templates, TEST_RECORD_TEMPLATES, 'Test records table templates are correct')
-  t.deepEqual(desc.tables[0].definition, TEST_RECORD_DEFINITION, 'Test records table schema is correct')
 })
 
 test('CRUD', async t => {
